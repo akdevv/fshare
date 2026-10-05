@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import {
+  batchNotify,
   clip,
   createServer,
   sweepParts,
@@ -230,4 +231,17 @@ test("a sealed file resumes from any byte: each range matches the whole", async 
   for (const from of [1, 7, 8, 65551, 65552, 65553, 150_000, whole.length - 1])
     assert.ok((await read(from)).equals(whole.subarray(from)), `from ${from}`);
   fs.rmSync(dir, { recursive: true });
+});
+
+test("received files make one notification per batch, not one per file", async () => {
+  const shown: string[][] = [];
+  const got = batchNotify((title, body) => shown.push([title, body]), 20);
+  got("/dl/a.jpg", "Galaxy S23");
+  await new Promise((r) => setTimeout(r, 40));
+  for (const f of ["b.jpg", "c.jpg", "d.jpg"]) got(`/dl/${f}`, "Galaxy S23");
+  await new Promise((r) => setTimeout(r, 40));
+  assert.deepEqual(shown, [
+    ["Received a.jpg", "From Galaxy S23"],
+    ["Received 3 files", "From Galaxy S23"],
+  ]);
 });

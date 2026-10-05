@@ -12,7 +12,7 @@ appId: host.exp.Exponent
     timeout: 90000
 - tapOn: Next
 - assertVisible: Plug in
-- assertVisible: npx fshare-cli, copy
+- assertVisible: fshare, copy
 - tapOn: Next
 - assertVisible: No cable\? Use Wi-Fi
 - tapOn: Get started

@@ -58,15 +58,20 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
-      - name: Packs and runs like a real install
+      - name: install.sh installs it from git, and it uninstalls
+        working-directory: .
+        env:
+          FSHARE_HOME: ${{ runner.temp }}/fshare
+          FSHARE_BIN: ${{ runner.temp }}/bin
         run: |
-          npm pack --pack-destination "$RUNNER_TEMP"
-          mkdir "$RUNNER_TEMP/try" && cd "$RUNNER_TEMP/try" && npm init -y > /dev/null
-          npm i "$RUNNER_TEMP"/fshare-cli-*.tgz
-          npx fshare --help | grep -q "fast file transfer"
+          git switch -c ci-install # install.sh clones a branch; CI checks out a commit
+          FSHARE_REPO="$PWD" FSHARE_REF=ci-install sh install.sh
+          "$FSHARE_BIN/fshare" --help | grep -q "fast file transfer"
+          "$FSHARE_BIN/fshare" uninstall
+          test ! -e "$FSHARE_BIN/fshare" && test ! -e "$FSHARE_HOME"
 
   cli-oldest-node:
-    # the published CLI is plain JS and must run on Node 20; the tests themselves need 22+
+    # the installed CLI is plain JS and must run on Node 20; the tests themselves need 22+
     name: CLI runs on Node 20
     runs-on: ubuntu-latest
     steps:
