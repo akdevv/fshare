@@ -81,3 +81,84 @@ render("splash-cookie.png", PHI, CLEAR, LIME, INK, which=None)
 render("splash-up.png", PHI, CLEAR, None, INK, which="up")
 render("splash-down.png", PHI, CLEAR, None, INK, which="down")
 print("icons written to", os.path.abspath(OUT))
+
+
+# Icon Composer layers (iOS Liquid Glass): same geometry on a 1024 canvas, one SVG per layer.
+def svgs(out, size=1024):
+    os.makedirs(out, exist_ok=True)
+    c, diameter = size / 2, size / PHI
+    r0, depth = diameter / 2 / (1 + PHI ** -6), PHI ** -6
+    pts = []
+    for i in range(720):
+        th = i / 720 * 2 * math.pi - math.pi / 2
+        r = r0 * (1 + depth * math.cos(9 * th))
+        pts.append(f"{c + r * math.cos(th):.2f},{c + r * math.sin(th):.2f}")
+    h = diameter / PHI ** 2
+    gap, sw, reach = h / PHI, h / PHI ** 4, h / PHI ** 3 / math.sqrt(2)
+    top, bot = c - h / 2 + sw / 2, c + h / 2 - sw / 2
+    lx, rx = c - gap / 2, c + gap / 2
+    f = lambda v: f"{v:.2f}"
+    up = f"M{f(lx)} {f(bot)}V{f(top)}M{f(lx - reach)} {f(top + reach)}L{f(lx)} {f(top)}L{f(lx + reach)} {f(top + reach)}"
+    down = f"M{f(rx)} {f(top)}V{f(bot)}M{f(rx - reach)} {f(bot - reach)}L{f(rx)} {f(bot)}L{f(rx + reach)} {f(bot - reach)}"
+    head = f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 {size} {size}">'
+    stroke = f'fill="none" stroke="#121A00" stroke-width="{f(sw)}" stroke-linecap="round" stroke-linejoin="round"'
+    files = {
+        "1-background.svg": f'{head}<rect width="{size}" height="{size}" fill="#0B0C0A"/></svg>',
+        "2-cookie.svg": f'{head}<polygon points="{" ".join(pts)}" fill="#C6F36A"/></svg>',
+        "3-arrows.svg": f'{head}<path d="{up}{down}" {stroke}/></svg>',
+    }
+    for name, body in files.items():
+        with open(os.path.join(out, name), "w") as fh:
+            fh.write(body + "\n")
+    print("icon composer layers written to", os.path.abspath(out))
+
+
+svgs(os.path.join(os.path.dirname(__file__), "..", "design", "icon-composer"))
+
+
+# Raster icons from the Liquid Glass design (mobile/assets/fshare.icon), rendered by Xcode's ictool.
+# Android can't draw glass live, so it gets the render: the adaptive foreground is the render's
+# centre, faded into the background colour (which the adaptive background layer repeats exactly).
+ICTOOL = "/Applications/Xcode.app/Contents/Applications/Icon Composer.app/Contents/Executables/ictool"
+
+
+def glass():
+    import subprocess
+    import tempfile
+
+    if not os.path.exists(ICTOOL):
+        print("Xcode's ictool not found; kept the flat PNG icons")
+        return
+    src = os.path.join(OUT, "fshare.icon")
+    tmp = os.path.join(tempfile.mkdtemp(), "glass.png")
+    subprocess.run([ICTOOL, src, "--export-image", "--output-file", tmp, "--platform", "iOS",
+                    "--rendition", "Default", "--width", "1024", "--height", "1024", "--scale", "1"],
+                   check=True, capture_output=True)
+    art = Image.open(tmp).convert("RGBA")
+    flat = Image.new("RGBA", art.size, BG)  # the render's corners are transparent
+    flat.alpha_composite(art)
+
+    # the cookie and its glow sit well inside this circle; past it the render is plain background
+    n = 1024
+    mask = Image.new("L", (n, n), 0)
+    px = mask.load()
+    inner, outer = n * 0.40, n * 0.47
+    for y in range(n):
+        for x in range(n):
+            r = math.hypot(x - n / 2, y - n / 2)
+            px[x, y] = 255 if r <= inner else 0 if r >= outer else int(255 * (outer - r) / (outer - inner))
+    centre = flat.copy()
+    centre.putalpha(mask)
+    # square icons: just the glass mark on plain background, without the render's rounded-corner rim
+    square = Image.new("RGBA", (n, n), BG)
+    square.alpha_composite(centre)
+    square.save(os.path.join(OUT, "icon.png"))
+    square.resize((48, 48), Image.LANCZOS).save(os.path.join(OUT, "favicon.png"))
+    k = round(n * ANDROID_SAFE)  # same safe-zone scale as the flat foreground
+    fg = Image.new("RGBA", (n, n), CLEAR)
+    fg.alpha_composite(centre.resize((k, k), Image.LANCZOS), ((n - k) // 2, (n - k) // 2))
+    fg.save(os.path.join(OUT, "android-icon-foreground.png"))
+    print("glass icons written (icon.png, favicon.png, android-icon-foreground.png)")
+
+
+glass()
