@@ -1,7 +1,12 @@
 #!/usr/bin/env node
-// Cut a release: bump the version, commit, tag. Pushing the tag runs .github/workflows/release.yml.
-//   npm run release -- cli patch     fshare-cli 0.2.0 -> 0.2.1, tag cli-v0.2.1
-//   npm run release -- app minor     app 1.0.0 -> 1.1.0 (versionCode 10100), tag app-v1.1.0
+// Releases, in two steps (main is protected, so version bumps go through a PR like everything else):
+//
+//   1. npm run release -- <cli|app> <patch|minor|major|x.y.z>
+//      bumps the version on a release/<what>-v<x.y.z> branch and opens a PR. CI checks it.
+//   2. after merging: npm run release:publish -- <cli|app>   (on an up-to-date main)
+//      cli: pushes tag cli-v<x.y.z>; CI publishes fshare-cli to npm and makes the GitHub release.
+//      app: builds the APK on this Mac, pushes tag app-v<x.y.z>, and makes the GitHub release with the APK.
+//
 // Versions are semver. The APK's versionCode is derived: major*10000 + minor*100 + patch, so it
 // always increases with the version (Android refuses to install a lower one over a higher one).
 import { execFileSync } from 'node:child_process';
@@ -22,44 +27,74 @@ export function versionCode(version) {
   return major * 10000 + minor * 100 + patch;
 }
 
-const git = (...args) => execFileSync('git', args, { encoding: 'utf8' }).trim();
+const run = (cmd, ...args) => execFileSync(cmd, args, { encoding: 'utf8', stdio: ['inherit', 'pipe', 'inherit'] }).trim();
+const live = (cmd, ...args) => execFileSync(cmd, args, { stdio: 'inherit' });
 const readJson = (f) => JSON.parse(fs.readFileSync(f, 'utf8'));
 const writeJson = (f, v) => fs.writeFileSync(f, JSON.stringify(v, null, 2) + '\n');
+const current = (what) => (what === 'cli' ? readJson('cli/package.json').version : readJson('mobile/app.json').expo.version);
 
-function main() {
-  const [what, part = 'patch'] = process.argv.slice(2);
-  if (!['cli', 'app'].includes(what)) {
-    console.log('usage: npm run release -- <cli|app> [patch|minor|major|x.y.z]');
-    process.exit(1);
-  }
-  if (git('status', '--porcelain')) throw new Error('commit or stash your changes first');
-  if (git('rev-parse', '--abbrev-ref', 'HEAD') !== 'main') throw new Error('release from main');
+function onCleanMain() {
+  if (run('git', 'status', '--porcelain')) throw new Error('commit or stash your changes first');
+  if (run('git', 'rev-parse', '--abbrev-ref', 'HEAD') !== 'main') throw new Error('switch to main first');
+  live('git', 'pull', '--ff-only');
+}
 
-  let next, files;
+function prepare(what, part) {
+  onCleanMain();
+  const next = bump(current(what), part);
+  const branch = `release/${what}-v${next}`;
+  live('git', 'switch', '-c', branch);
   if (what === 'cli') {
     const pkg = readJson('cli/package.json');
-    next = bump(pkg.version, part);
     pkg.version = next;
     writeJson('cli/package.json', pkg);
     const lock = readJson('cli/package-lock.json');
     lock.version = next;
     lock.packages[''].version = next;
     writeJson('cli/package-lock.json', lock);
-    files = ['cli/package.json', 'cli/package-lock.json'];
   } else {
     const app = readJson('mobile/app.json');
-    next = bump(app.expo.version, part);
     app.expo.version = next;
     app.expo.android.versionCode = versionCode(next);
     app.expo.ios.buildNumber = String(versionCode(next));
     writeJson('mobile/app.json', app);
-    files = ['mobile/app.json'];
   }
-  const tag = `${what}-v${next}`;
-  git('add', ...files);
-  git('commit', '-m', `release: ${what} v${next}`);
-  git('tag', '-a', tag, '-m', `${what} v${next}`);
-  console.log(`Tagged ${tag}. Push it to publish:\n  git push origin main ${tag}`);
+  live('git', 'commit', '-am', `release: ${what} v${next}`);
+  live('git', 'push', '-u', 'origin', branch);
+  live(
+    'gh',
+    'pr',
+    'create',
+    '--title',
+    `Release ${what} v${next}`,
+    '--body',
+    `Bumps ${what} to v${next}. After merging: \`npm run release:publish -- ${what}\``,
+  );
+}
+
+function publish(what) {
+  onCleanMain();
+  const version = current(what);
+  const tag = `${what}-v${version}`;
+  if (run('git', 'tag', '--list', tag)) throw new Error(`${tag} already exists; bump the version first`);
+  if (what === 'app') live('bash', 'scripts/build-apk.sh'); // before tagging, so a failed build leaves nothing behind
+  live('git', 'tag', '-a', tag, '-m', `${what} v${version}`);
+  live('git', 'push', 'origin', tag);
+  if (what === 'app') {
+    live('gh', 'release', 'create', tag, `dist/fshare-${version}.apk`, '--title', `App ${version}`, '--generate-notes');
+  } else {
+    console.log(`Pushed ${tag}: CI publishes fshare-cli@${version} and creates the GitHub release.`);
+  }
+}
+
+function main() {
+  const [step, what, part = 'patch'] = process.argv.slice(2);
+  if (!['prepare', 'publish'].includes(step) || !['cli', 'app'].includes(what)) {
+    console.log('usage: npm run release -- <cli|app> [patch|minor|major|x.y.z]\n       npm run release:publish -- <cli|app>');
+    process.exit(1);
+  }
+  if (step === 'prepare') prepare(what, part);
+  else publish(what);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) main();

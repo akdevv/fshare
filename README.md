@@ -81,32 +81,35 @@ npm run e2e        # end-to-end on this Mac (see below)
 (quit any running `fshare`). `npm run e2e` starts the CLI with sample files, Metro if needed, resets the
 app's saved state, runs `mobile/e2e/app.yaml`, and checks the CLI really sent and unshared the files.
 
-**Android build locally:** `cd mobile && npx expo prebuild -p android && cd android && ./gradlew assembleRelease`
-(needs JDK 17 and the Android SDK).
+**APK (local only):** `npm run apk` builds `dist/fshare-<version>.apk` (a few minutes; needs JDK 17 and
+the Android SDK: `brew install openjdk@17 && brew install --cask android-commandlinetools`). APKs aren't
+built in CI. Build one before merging app changes you want to try on a phone.
 
 ## CI/CD
 
-- **`.github/workflows/ci.yml`** runs on every pull request and push to `main`:
+- **`.github/workflows/ci.yml`** runs on every pull request and push to `main`, in a few minutes:
   - checks (format, lint, types, tests, expo-doctor)
   - CLI tests on Node 22/24 (Linux and macOS) plus a packed-install smoke test
   - the CLI on Node 20
-  - an Android APK build, uploaded as a workflow artifact
-- `main` is protected: changes land through pull requests, and a PR can only merge once all checks pass.
-- **`.github/workflows/release.yml`** runs on version tags (below).
+- `main` is protected, including for admins: changes land through pull requests, and a PR can only
+  merge once all checks pass and it's up to date with `main`.
+- **`.github/workflows/release.yml`** publishes the CLI when a `cli-v*` tag is pushed.
 
 ## Versioning and releases
 
-Both parts use semver and are released separately, each with its own tag.
+Both parts use semver and are released separately, each with its own tag. Because `main` is protected,
+a release is two steps:
 
 ```sh
-npm run release -- cli patch    # 0.2.0 -> 0.2.1, commits and tags cli-v0.2.1
-npm run release -- app minor    # 1.0.0 -> 1.1.0, tags app-v1.1.0
-git push origin main <tag>      # CI publishes it
+npm run release -- app minor        # 1. bump on a release branch and open a PR (CI checks it)
+                                    #    ...merge the PR...
+npm run release:publish -- app      # 2. on main: tag it and publish
 ```
 
-- **CLI** (`cli/package.json`): a `cli-v*` tag publishes `fshare-cli` to npm (needs the `NPM_TOKEN`
-  repo secret) and creates a GitHub release.
-- **App** (`mobile/app.json`): an `app-v*` tag builds the APK and attaches it to a GitHub release. The
-  Android `versionCode` is derived from the version (`major*10000 + minor*100 + patch`, so 1.2.3 → 10203)
-  and always increases. To sign with your own key instead of the debug key, add the secrets
-  `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` and `ANDROID_KEY_PASSWORD`.
+- **CLI** (`cli/package.json`): publishing pushes `cli-vX.Y.Z`, and CI publishes `fshare-cli` to npm
+  (needs the `NPM_TOKEN` repo secret) and creates the GitHub release.
+- **App** (`mobile/app.json`): publishing builds the APK on your Mac, pushes `app-vX.Y.Z`, and creates
+  the GitHub release with the APK attached. The Android `versionCode` is derived from the version
+  (`major*10000 + minor*100 + patch`, so 1.2.3 → 10203) and always increases. To sign with your own
+  key instead of the debug key, set `FSHARE_KEYSTORE`, `FSHARE_KEYSTORE_PASSWORD`, `FSHARE_KEY_ALIAS`
+  and `FSHARE_KEY_PASSWORD` before publishing.
