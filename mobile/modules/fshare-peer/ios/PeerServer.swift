@@ -6,11 +6,13 @@ typealias Emit = (String, [String: Any?]) -> Void
 let keepParts: TimeInterval = 5 * 60 // how long a half-received file waits for the sender to resume
 
 // The receiving half of fshare on an iPhone. Same HTTP as PeerServer.kt on Android (and the laptop
-// CLI), so any phone sends here with the upload code it already has:
-//   POST /hello?name=&port=&token=&id= Wi-Fi pairing: asks the user here to accept, then returns the token
-//   GET  /list                         [] (phones push, they don't publish files) + name headers
-//   GET|PUT|DELETE /upload?id=         resumable upload; finished parts are handed to JS to save
-// Everything runs on one serial queue. ponytail: no TLS, same as the laptop and Android.
+// CLI), so any phone sends here with the upload code it already has. Every request but /hello is
+// signed with this phone's token, and everything is sealed (see Seal.swift):
+//   POST /hello?name=&port=&id=&pub=   Wi-Fi pairing, step 1: swap ECDH keys, get a request id
+//   POST /hello?wait=&token=           step 2: our user compares the code and accepts; returns our token, sealed
+//   GET  /list                         sealed { name, kind: "phone", files: [] }
+//   GET|PUT|DELETE /upload?id=         resumable upload of a sealed file; opened, then handed to JS to save
+// Everything runs on one serial queue.
 final class PeerServer {
   let q = DispatchQueue(label: "fshare-server")
   let name: String
@@ -25,6 +27,8 @@ final class PeerServer {
   private var pairs = [String: (Bool) -> Void]()
   private var uploads = [String: Conn]()
   private var cancelled = Set<String>()
+  private var finished = Set<String>() // saved already: a replay isn't saved twice
+  private var hellos = [String: (secret: String, code: String, name: String, port: Int, peer: String, at: Date)]()
 
   init(port: UInt16, token: String, name: String, id: String, visible: Bool, parts: URL, emit: @escaping Emit) {
     self.port = port; self.token = token; self.name = name; self.id = id
@@ -118,8 +122,11 @@ final class PeerServer {
     }
     if r.path == "/pair" { return reply(403, "", "text/plain") } // only the Android USB cable uses this
     if r.method == "POST" && r.path == "/hello" { return k.body(r.length, { _ in true }) { ok in ok ? self.hello(k, r) : k.close() } }
-    guard r.query["t"] == token else { return reply(403, "bad token", "text/plain") }
-    if r.method == "GET" && r.path == "/list" { return reply(200, "[]", "application/json") }
+    guard Seal.verify(token, r.method, r.target) else { return reply(403, "bad signature", "text/plain") }
+    if r.method == "GET" && r.path == "/list" {
+      let list = try! JSONSerialization.data(withJSONObject: ["name": name, "kind": "phone", "files": []])
+      return reply(200, Seal.seal(token, list), "text/plain")
+    }
     if r.path == "/upload", let id = r.query["id"] {
       switch r.method {
       case "GET": return reply(200, "{\"received\":\(size(id))}", "application/json")
@@ -136,24 +143,35 @@ final class PeerServer {
 
   private func hello(_ k: Conn, _ r: Request) {
     guard visible else { return k.respond(403, "hidden") }
-    let id = UUID().uuidString
+    hellos = hellos.filter { Date().timeIntervalSince($0.value.at) < 120 }
+    guard let wait = r.query["wait"] else {
+      // step 1: both sides now share a secret nobody on the Wi-Fi can work out
+      let pairing = Seal.Pairing()
+      guard let (secret, code) = try? pairing.finish(r.query["pub"] ?? "") else { return k.respond(400, "bad key") }
+      let id = UUID().uuidString
+      hellos[id] = (secret, code, r.query["name"] ?? "Phone", Int(r.query["port"] ?? "") ?? 0, r.query["id"] ?? "", Date())
+      let body = try! JSONSerialization.data(withJSONObject: ["id": id, "pub": pairing.pub])
+      return k.respond(200, String(decoding: body, as: UTF8.self), "application/json")
+    }
+    // step 2: their token, sealed with the secret; ask our user, who checks the code matches theirs
+    guard let h = hellos.removeValue(forKey: wait) else { return k.respond(403, "expired") }
+    guard let theirs = Seal.openText(h.secret, r.query["token"]) else { return k.respond(403, "bad token") }
     var answered = false
     let finish = { (ok: Bool) in
       if answered { return }
       answered = true
-      self.pairs[id] = nil
-      ok ? k.respond(200, self.token) : k.respond(403, "declined")
+      self.pairs[wait] = nil
+      ok ? k.respond(200, Seal.seal(h.secret, Data(self.token.utf8))) : k.respond(403, "declined")
     }
-    pairs[id] = finish
+    pairs[wait] = finish
     emit("pairRequest", [
-      "id": id, "name": r.query["name"] ?? "Phone", "host": k.host,
-      "port": Int(r.query["port"] ?? "") ?? 0, "token": r.query["token"] ?? "", "peer": r.query["id"] ?? "",
+      "id": wait, "name": h.name, "host": k.host, "port": h.port, "token": theirs, "peer": h.peer, "code": h.code,
     ])
     q.asyncAfter(deadline: .now() + 60) { finish(false) }
   }
 
   private func upload(_ k: Conn, _ r: Request, _ id: String) {
-    let name = (r.query["name"] ?? "").components(separatedBy: "/").last!.trimmingCharacters(in: .whitespaces)
+    let name = (Seal.openText(token, r.query["name"]) ?? "").components(separatedBy: "/").last!.trimmingCharacters(in: .whitespaces)
     let offset = Int64(r.query["offset"] ?? "") ?? 0
     let total = Int64(r.query["size"] ?? "") ?? Int64(r.length)
     let f = part(id)
@@ -162,13 +180,14 @@ final class PeerServer {
       k.body(r.length, { _ in true }) { ok in ok ? k.respond(code, body, type) : k.close() }
     }
     if name.isEmpty || name == "." || name == ".." { return refuse(400, "bad name", "text/plain") }
+    if finished.contains(id) { return refuse(200, "ok", "text/plain") }
     if offset > have { return refuse(409, "{\"received\":\(have)}", "application/json") }
     if !FileManager.default.fileExists(atPath: f.path) { FileManager.default.createFile(atPath: f.path, contents: nil) }
     guard let h = try? FileHandle(forWritingTo: f) else { return refuse(400, "can't write", "text/plain") }
     try? h.truncate(atOffset: UInt64(offset))
     cancelled.remove(id)
     uploads[id] = k
-    let from = r.headers["x-fshare-client"]?.removingPercentEncoding ?? "Phone"
+    let from = Seal.openText(token, r.headers["x-fshare-client"]) ?? "Phone"
     var done = offset
     var last = Date.distantPast
     let info = { () -> [String: Any?] in ["id": id, "name": name, "from": from, "done": Double(done), "total": Double(total)] }
@@ -191,15 +210,31 @@ final class PeerServer {
         return k.close()
       }
       if self.size(id) != total { return k.respond(400, "incomplete") }
+      self.finished.insert(id)
+      k.respond(200, "ok") // all here; opening it can take a while for a big file, so don't keep the sender waiting
       self.emit("progress", info())
-      self.emit("received", ["id": id, "name": name, "from": from, "uri": f.absoluteString, "size": Double(total)])
-      k.respond(200, "ok")
+      let plain = f.appendingPathExtension("open")
+      let token = self.token
+      DispatchQueue.global(qos: .userInitiated).async {
+        do {
+          try Seal.openFile(token, from: f, to: plain)
+          try? FileManager.default.removeItem(at: f)
+          let size = (try? FileManager.default.attributesOfItem(atPath: plain.path)[.size] as? NSNumber)?.doubleValue ?? 0
+          self.emit("received", ["id": id, "name": name, "from": from, "uri": plain.absoluteString, "size": size])
+        } catch {
+          // didn't open: not sealed with our token, or damaged on the way. Keep nothing.
+          try? FileManager.default.removeItem(at: plain)
+          try? FileManager.default.removeItem(at: f)
+          self.emit("stopped", ["id": id, "reason": "cancelled"])
+        }
+      }
     }
   }
 }
 
 struct Request {
   let method: String
+  let target: String // "/upload?id=…&s=…" exactly as sent: what the signature covers
   let path: String
   let query: [String: String]
   let headers: [String: String]
@@ -209,6 +244,7 @@ struct Request {
     let lines = head.components(separatedBy: "\r\n")
     let first = lines.first?.split(separator: " ") ?? []
     method = first.first.map(String.init) ?? ""
+    target = first.count > 1 ? String(first[1]) : "/"
     let url = URLComponents(string: "http://x" + (first.count > 1 ? String(first[1]) : "/"))
     path = url?.path ?? "/"
     var q = [String: String]()
@@ -293,9 +329,8 @@ final class Conn {
   func respond(_ code: Int, _ body: String, _ type: String = "text/plain") {
     let b = Data(body.utf8)
     let reason = [200: "OK", 400: "Bad Request", 403: "Forbidden", 404: "Not Found", 409: "Conflict"][code] ?? "OK"
-    let name = s.name.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
     let head = "HTTP/1.1 \(code) \(reason)\r\nContent-Type: \(type)\r\nContent-Length: \(b.count)\r\n" +
-      "x-fshare-name: \(name)\r\nx-fshare-version: 2\r\nx-fshare-kind: phone\r\nConnection: keep-alive\r\n\r\n"
+      "x-fshare-version: 3\r\nConnection: keep-alive\r\n\r\n"
     c.send(content: Data(head.utf8) + b, completion: .contentProcessed { err in
       if err != nil { self.close() } else { self.head() }
     })

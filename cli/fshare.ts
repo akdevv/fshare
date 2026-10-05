@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 // fshare — LAN file transfer. Laptop runs this HTTP server; phone app talks to it.
-//   GET  /list?t=TOKEN          -> [{ id, path, size }]  files the laptop is sharing
-//   GET  /file/:id?t=TOKEN      -> raw file bytes
-//   PUT  /upload?t=TOKEN&name=  -> raw body saved to OUT_DIR/name
+// Every request is signed with the pairing token (&s=, see seal.ts) and everything is sealed:
+//   GET  /pair                  -> token, loopback only (the USB cable)
+//   GET  /list                  -> sealed { name, kind, files: [{ id, path, size }] }
+//   GET  /file/:id              -> the file, sealed (Range works on the sealed bytes)
+//   GET|PUT|DELETE /upload?id=  -> resumable upload of a sealed file; name= is sealed too
 import http from "node:http";
 import net from "node:net";
 import fs from "node:fs";
@@ -13,9 +15,11 @@ import readline from "node:readline";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { styleText } from "node:util";
+import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import qrcode from "qrcode-terminal";
+import { fileSalt, open, opener, seal, sealedSize, sealFile, verify } from "./seal.ts";
 
 const CHUNK = 1 << 20; // 1 MB stream buffers: fewer syscalls, higher throughput
 const PART = ".fshare-part"; // in-progress uploads; renamed on success, deleted on cancel
@@ -38,7 +42,7 @@ export function sweepParts(dir: string, busy: Set<string>, keep = KEEP_MS, now =
     } catch {}
   }
 }
-const VERSION = "2";
+const VERSION = "3"; // 3: end-to-end encrypted
 const PKG_VERSION = (() => {
   for (const p of ["./package.json", "../package.json"])
     try {
@@ -273,10 +277,11 @@ export function createServer(opts: { token: string; outDir: string; shared: Shar
       return 0;
     }
   };
-  const name = encodeURIComponent(opts.name ?? computerName());
+  const name = opts.name ?? computerName();
   const ui = opts.ui ?? new UI();
   const taken = new Set<string>();
   const writing = new Set<string>(); // parts mid-upload, never swept
+  const finished = new Set<string>(); // upload ids already saved: a replayed upload isn't saved twice
 
   const track = (stream: NodeJS.ReadableStream, name: string, total: number, dir: Active["dir"], cancel: () => void, start = 0) => {
     const a: Active = { name, dir, done: start, total, rate: 0, last: start, cancel };
@@ -298,8 +303,9 @@ export function createServer(opts: { token: string; outDir: string; shared: Shar
       else res.writeHead(403).end();
       return;
     }
-    if (url.searchParams.get("t") !== token) {
-      res.writeHead(403).end("bad token");
+    // signed with the token, or nothing: an app from before encryption gets told to update
+    if (!verify(token, req.method ?? "", req.url!)) {
+      res.writeHead(403, { "x-fshare-version": VERSION }).end("bad signature");
       return;
     }
 
@@ -307,15 +313,11 @@ export function createServer(opts: { token: string; outDir: string; shared: Shar
     if (req.method === "GET" && url.pathname === "/list") {
       const addr = req.socket.remoteAddress?.replace("::ffff:", "") ?? "";
       const client = req.headers["x-fshare-client"];
-      ui.seen(typeof client === "string" ? decodeURIComponent(client) : "Phone", addr === "127.0.0.1" || addr === "::1");
+      ui.seen((typeof client === "string" && open(token, client)?.toString()) || "Phone", addr === "127.0.0.1" || addr === "::1");
+      const files = shared.filter((s) => !(phone && s.delivered?.has(phone))).map(({ id, path, size }) => ({ id, path, size }));
       res
-        .writeHead(200, {
-          "content-type": "application/json",
-          "x-fshare-name": name,
-          "x-fshare-version": VERSION,
-          "x-fshare-kind": "laptop",
-        })
-        .end(JSON.stringify(shared.filter((s) => !(phone && s.delivered?.has(phone))).map(({ id, path, size }) => ({ id, path, size }))));
+        .writeHead(200, { "content-type": "text/plain", "x-fshare-version": VERSION })
+        .end(seal(token, JSON.stringify({ name, kind: "laptop", files })));
       return;
     }
 
@@ -342,24 +344,24 @@ export function createServer(opts: { token: string; outDir: string; shared: Shar
       const st = fs.statSync(f.abs);
       const etag = `"${st.size.toString(16)}-${Math.floor(st.mtimeMs).toString(16)}"`,
         modified = st.mtime.toUTCString();
+      const total = sealedSize(st.size); // what goes over the wire: the file, sealed
       const ifRange = req.headers["if-range"];
       const fresh = !ifRange || ifRange === etag || ifRange === modified;
       const from = fresh ? Number(/^bytes=(\d+)-$/.exec(req.headers.range ?? "")?.[1] ?? 0) : 0;
-      if (from >= f.size && from > 0) {
-        res.writeHead(416, { "content-range": `bytes */${f.size}` }).end();
+      if (from >= total && from > 0) {
+        res.writeHead(416, { "content-range": `bytes */${total}` }).end();
         return;
       }
       res.writeHead(from ? 206 : 200, {
         "content-type": "application/octet-stream",
-        "content-length": f.size - from,
+        "content-length": total - from,
         "accept-ranges": "bytes",
         etag,
         "last-modified": modified,
-        ...(from && { "content-range": `bytes ${from}-${f.size - 1}/${f.size}` }),
-        "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(path.basename(f.path))}`,
+        ...(from && { "content-range": `bytes ${from}-${total - 1}/${total}` }),
       });
-      const src = fs.createReadStream(f.abs, { highWaterMark: CHUNK, start: from });
-      const untrack = track(src, f.path, f.size, "down", () => res.destroy(), from);
+      const src = Readable.from(sealFile(token, f.abs, st.size, fileSalt(token, f.abs, st), from));
+      const untrack = track(src, f.path, total, "down", () => res.destroy(), from);
       const t0 = Date.now();
       try {
         await pipeline(src, res);
@@ -386,12 +388,16 @@ export function createServer(opts: { token: string; outDir: string; shared: Shar
       return;
     }
     if (id && req.method === "PUT") {
-      const name = url.searchParams.get("name") ?? "";
+      const name = open(token, url.searchParams.get("name") ?? "")?.toString() ?? "";
       const offset = Number(url.searchParams.get("offset") ?? 0);
       const size = Number(url.searchParams.get("size") ?? 0);
       const part = partOf(id);
       if (!name || !safeDest(outDir, name)) {
         res.writeHead(400).end("bad name");
+        return;
+      }
+      if (finished.has(id)) {
+        res.writeHead(200).end("ok"); // already saved; a replay or a retry after a lost reply
         return;
       }
       if (offset > sizeOf(part)) {
@@ -420,12 +426,23 @@ export function createServer(opts: { token: string; outDir: string; shared: Shar
         if (sizeOf(part) !== size) throw new Error("incomplete");
         const dest = safeDest(outDir, name, taken)!;
         fs.mkdirSync(path.dirname(dest), { recursive: true });
+        taken.add(dest);
         try {
-          fs.renameSync(part, dest);
+          await pipeline(fs.createReadStream(part, { highWaterMark: CHUNK }), opener(token), fs.createWriteStream(dest + PART));
+          fs.renameSync(dest + PART, dest);
         } catch {
-          fs.copyFileSync(part, dest);
-          fs.rmSync(part);
-        } // tmp may be another volume
+          // arrived whole but doesn't open: not from a device with this key, or damaged on the way
+          fs.rmSync(dest + PART, { force: true });
+          fs.rmSync(part, { force: true });
+          taken.delete(dest);
+          untrack();
+          ui.log(`  ${c.red("✗")} Rejected  ${name}  ${c.dim("didn't decrypt")}`);
+          res.writeHead(400).end("bad data");
+          return;
+        }
+        taken.delete(dest);
+        fs.rmSync(part, { force: true });
+        finished.add(id);
         res.writeHead(200).end("ok");
         untrack();
         ui.log(`  ${c.green("✓")} Received  ${home(dest)}  ${took(t0, size - offset)}`);
@@ -438,33 +455,6 @@ export function createServer(opts: { token: string; outDir: string; shared: Shar
       } finally {
         writing.delete(part);
       }
-      return;
-    }
-
-    if (req.method === "PUT" && url.pathname === "/upload") {
-      const name = url.searchParams.get("name") ?? "";
-      const dest = name && safeDest(outDir, name, taken);
-      if (!dest) {
-        res.writeHead(400).end("bad name");
-        return;
-      }
-      taken.add(dest);
-      fs.mkdirSync(path.dirname(dest), { recursive: true });
-      const total = Number(req.headers["content-length"] ?? 0);
-      const untrack = track(req, name, total, "up", () => req.destroy());
-      const t0 = Date.now();
-      try {
-        await pipeline(req, fs.createWriteStream(dest + PART, { highWaterMark: CHUNK }));
-        fs.renameSync(dest + PART, dest);
-        res.writeHead(200).end("ok");
-        untrack();
-        ui.log(`  ${c.green("✓")} Received  ${home(dest)}  ${took(t0, total)}`);
-      } catch {
-        fs.rmSync(dest + PART, { force: true }); // cancelled: don't leave half-written files around
-        untrack();
-        ui.log(`  ${c.red("✗")} Cancelled ${name}  ${c.dim("partial file deleted")}`);
-      }
-      taken.delete(dest);
       return;
     }
 

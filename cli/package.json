@@ -1,6 +1,6 @@
 {
   "name": "fshare-cli",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Fast file transfer between your computer and phone, over USB cable or Wi-Fi.",
   "keywords": [
     "file-transfer",

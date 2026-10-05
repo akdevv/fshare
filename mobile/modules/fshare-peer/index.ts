@@ -5,7 +5,8 @@ import Constants from 'expo-constants';
 
 type EventSubscription = { remove(): void };
 
-export type PairRequest = { id: string; name: string; host: string; port: number; token: string; peer: string }; // peer: the asking phone's app id
+// peer: the asking phone's app id; code: the 6 digits both screens show, to check nobody's in between
+export type PairRequest = { id: string; name: string; host: string; port: number; token: string; peer: string; code: string };
 export type Incoming = { id: string; name: string; from: string; done: number; total: number };
 export type Received = { id: string; name: string; from: string; uri: string; size: number };
 export type Stopped = { id: string; reason: 'paused' | 'cancelled' | 'expired'; done?: number }; // expired: kept 5 min, never resumed
@@ -28,6 +29,14 @@ type PeerModule = {
   // keep running while minimized (Android: foreground service + ongoing notification; iOS: background task)
   background(on: boolean, title: string, text: string, progress: number): void;
   answerPair(id: string, ok: boolean): void;
+  // end-to-end encryption, same spec as cli/seal.ts
+  sign(token: string, msg: string): string;
+  seal(token: string, text: string): string;
+  open(token: string, sealed: string): string | null;
+  sealFile(token: string, src: string, dst: string, seed: string): Promise<number>; // sealed size
+  openFile(token: string, src: string, dst: string): Promise<number>; // rejects if it doesn't open
+  pairStart(): string; // our public key
+  pairFinish(theirPub: string): { secret: string; code: string };
   cancel(id: string): void;
   addListener<K extends keyof Events>(event: K, fn: Events[K]): EventSubscription;
 };

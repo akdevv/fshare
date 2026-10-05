@@ -11,6 +11,7 @@
     "test": "node --test scripts/*.test.mjs && npm test --prefix cli && npm test --prefix mobile",
     "check": "npm run format:check && npm run lint && npm run typecheck && npm test",
     "e2e": "bash mobile/e2e/run.sh",
+    "test:native": "bash mobile/modules/fshare-peer/test/run.sh",
     "release": "node scripts/release.mjs prepare",
     "release:publish": "node scripts/release.mjs publish",
     "apk": "bash scripts/build-apk.sh"

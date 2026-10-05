@@ -49,10 +49,19 @@ Received files save automatically: Android into a folder inside `Download` you p
 
 ## How it works
 
-Plain HTTP over the LAN. The laptop serves files and accepts `PUT` uploads; the phone uses
-Expo's native download/upload tasks, so bytes never pass through JS. A random token in the
-QR URL keeps other devices on the network out. Traffic is **not encrypted**, so use it on
-networks you trust.
+HTTP over the LAN, encrypted end to end. The laptop serves files and accepts `PUT` uploads;
+the phone uses Expo's native download/upload tasks, so bytes never pass through JS.
+
+- **Pairing.** A random token reaches the phone through the QR code or the USB cable, never over
+  Wi-Fi. Two phones pair with an ECDH key exchange and show the same 6-digit code to compare.
+- **Requests** are signed with the token (HMAC-SHA256), so nobody else on the network can list,
+  download, upload or delete anything.
+- **Everything is sealed** with AES-256-GCM: file contents (in 64 KB chunks, so paused transfers
+  still resume), file names, the shared-file list and device names. A file that was cut short or
+  changed on the way is refused, not saved.
+
+The spec is at the top of [`cli/seal.ts`](cli/seal.ts); the app's `Seal.kt` and `Seal.swift`
+follow it byte for byte.
 
 Speed tips: 5 GHz / Wi-Fi 6, laptop near the router (or wired to it), phone and laptop on the
 same network band.

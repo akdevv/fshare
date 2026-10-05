@@ -1,9 +1,11 @@
 // Pure helpers and the USB accessory tunnel (driven by a fake phone, no hardware needed).
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
 import {
   clip,
   createServer,
@@ -17,6 +19,7 @@ import {
   UI,
   usbParts,
 } from "./fshare.ts";
+import { open, pairSecret, seal, sealedSize, sealFile, sign, verify } from "./seal.ts";
 
 const plain = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, ""); // eslint-disable-line no-control-regex
 
@@ -176,4 +179,55 @@ test("switchToAccessory sends the AOA strings and the start request, each with a
     sent.map(([r]) => r),
     [52, 52, 52, 52, 52, 52, 53],
   );
+});
+
+test("signatures: only the token holder can make one, and they cover method, path and query", () => {
+  const q = "/upload?id=1&c=p";
+  const url = `${q}&s=${sign("tok", `PUT ${q}`)}`;
+  assert.ok(verify("tok", "PUT", url));
+  assert.ok(!verify("tok", "GET", url));
+  assert.ok(!verify("other", "PUT", url));
+  assert.ok(!verify("tok", "PUT", url.replace("id=1", "id=2")));
+  assert.ok(!verify("tok", "PUT", q));
+});
+
+test("sealed messages open only with the same token, and never twice the same", () => {
+  const a = seal("tok", "MacBook Air"),
+    b = seal("tok", "MacBook Air");
+  assert.notEqual(a, b); // fresh nonce each time
+  assert.match(a, /^[\w-]+$/); // base64url: safe in a URL
+  assert.equal(open("tok", a)?.toString(), "MacBook Air");
+  assert.equal(open("nope", a), null);
+  assert.equal(open("tok", a.slice(0, -2) + (a.endsWith("A") ? "B" : "A") + a.slice(-1)), null);
+  assert.equal(open("tok", "garbage"), null);
+});
+
+test("pairing: both phones get the same secret and code, a third key doesn't", () => {
+  const key = () => {
+    const k = crypto.createECDH("prime256v1");
+    k.generateKeys();
+    return k;
+  };
+  const a = key(),
+    b = key(),
+    m = key();
+  const pub = (k: crypto.ECDH) => k.getPublicKey().toString("base64url");
+  const ab = pairSecret(a, pub(b)),
+    ba = pairSecret(b, pub(a));
+  assert.deepEqual(ab, ba);
+  assert.match(ab.code, /^\d{6}$/);
+  assert.notEqual(pairSecret(a, pub(m)).secret, ab.secret); // someone in between ends up with other codes
+});
+
+test("a sealed file resumes from any byte: each range matches the whole", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fshare-seal-"));
+  const f = path.join(dir, "f");
+  fs.writeFileSync(f, crypto.randomBytes(200_000));
+  const salt = Buffer.alloc(7, 5);
+  const read = async (from = 0) => Buffer.concat(await Readable.from(sealFile("tok", f, 200_000, salt, from)).toArray());
+  const whole = await read();
+  assert.equal(whole.length, sealedSize(200_000));
+  for (const from of [1, 7, 8, 65551, 65552, 65553, 150_000, whole.length - 1])
+    assert.ok((await read(from)).equals(whole.subarray(from)), `from ${from}`);
+  fs.rmSync(dir, { recursive: true });
 });
