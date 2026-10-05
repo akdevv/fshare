@@ -22,7 +22,7 @@ typealias Emit = (String, Map<String, Any?>) -> Unit
 // The receiving half of fshare on a phone. Speaks the same HTTP as the laptop CLI, so the
 // app's existing upload code (resumable PUT /upload) works phone-to-phone unchanged:
 //   GET  /pair                    token, loopback only (i.e. through the USB cable tunnel)
-//   POST /hello?name=&port=&token= Wi-Fi pairing: asks the user here to accept, then returns the token
+//   POST /hello?name=&port=&token=&id= Wi-Fi pairing: asks the user here to accept, then returns the token
 //   GET  /list                    [] (phones push, they don't publish files) + name headers
 //   GET|PUT|DELETE /upload?id=    resumable upload; finished parts are handed to JS to save
 // ponytail: thread per connection, no TLS (same as the laptop); fine for a handful of peers.
@@ -37,6 +37,7 @@ class PeerServer(
   private val pairs = ConcurrentHashMap<String, CompletableFuture<Boolean>>()
   private val uploads = ConcurrentHashMap<String, Socket>()
   private val cancelled = ConcurrentHashMap.newKeySet<String>()
+  @Volatile var visible = true // hidden: new phones can't ask to pair; paired ones already have the token
 
   fun start() {
     partsDir.mkdirs()
@@ -100,12 +101,14 @@ class PeerServer(
 
     if (path == "/hello" && method == "POST") {
       skip(input, length)
+      if (!visible) return respond(out, 403, "hidden")
       val id = UUID.randomUUID().toString()
       val wait = CompletableFuture<Boolean>()
       pairs[id] = wait
       emit("pairRequest", mapOf(
         "id" to id, "name" to (q("name") ?: "Phone"), "host" to s.inetAddress.hostAddress,
         "port" to (q("port")?.toIntOrNull() ?: 0), "token" to (q("token") ?: ""),
+        "peer" to (q("id") ?: ""),
       ))
       val ok = try { wait.get(60, TimeUnit.SECONDS) } catch (_: Exception) { false }
       pairs.remove(id)

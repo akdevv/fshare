@@ -1,4 +1,5 @@
 {
-  "platforms": ["android"],
+  "platforms": ["apple", "android"],
+  "apple": { "modules": ["FsharePeerModule"] },
   "android": { "modules": ["expo.modules.fsharepeer.FsharePeerModule"] }
 }

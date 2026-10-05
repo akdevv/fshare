@@ -4,6 +4,9 @@ jest.mock('react-native-reanimated', () => ({
   ...require('react-native-reanimated/mock'),
   // newer APIs the bundled mock doesn't cover; animations don't run in tests anyway
   cubicBezier: () => 'ease-out',
+  // animated styles aren't under test; the mock would run the worklets with stub easings
+  useAnimatedStyle: () => ({}),
+  useAnimatedProps: () => ({}),
   useReducedMotion: () => true,
   Keyframe: class {
     duration() {
@@ -15,6 +18,8 @@ jest.mock('react-native-reanimated', () => ({
   },
 }));
 
+require('react-native-gesture-handler/jestSetup');
+
 jest.mock('./prefs', () => {
   let prefs = {};
   return {
@@ -22,3 +27,5 @@ jest.mock('./prefs', () => {
     writePrefs: (p: object) => (prefs = { ...prefs, ...p }),
   };
 });
+
+jest.mock('expo-crypto', () => ({ randomUUID: () => require('crypto').randomUUID() }));

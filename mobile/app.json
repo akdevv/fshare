@@ -15,7 +15,8 @@
           "NSAllowsLocalNetworking": true
         },
         "UIFileSharingEnabled": true,
-        "LSSupportsOpeningDocumentsInPlace": true
+        "LSSupportsOpeningDocumentsInPlace": true,
+        "NSBonjourServices": ["_fshare._tcp"]
       },
       "buildNumber": "10000"
     },
@@ -72,7 +73,8 @@
         }
       ],
       "expo-asset",
-      "./plugins/with-release-signing"
+      "./plugins/with-release-signing",
+      "./plugins/with-scene-lifecycle"
     ]
   }
 }

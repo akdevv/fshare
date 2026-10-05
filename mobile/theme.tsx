@@ -42,7 +42,7 @@ const dark: Theme = {
   red: '#FF8A7E',
   redSoft: '#3A1714',
   amber: '#FFCB5C',
-  backdrop: 'rgba(0,0,0,0.72)',
+  backdrop: 'rgba(0,0,0,0.6)',
 };
 
 const light: Theme = {
@@ -128,3 +128,11 @@ export function fileIcon(name: string): keyof typeof Ionicons.glyphMap {
   if (/^(pdf|docx?|txt|md|xlsx?|pptx?|csv)$/.test(ext)) return 'document-text-outline';
   return 'document-outline';
 }
+
+// Plus Jakarta Sans, loaded in App, for onboarding and the choose-folder screen; the rest of the app uses the system font. Custom fonts ignore fontWeight on Android, so each weight is its own family.
+export const font = {
+  medium: 'PlusJakartaSans_500Medium',
+  semibold: 'PlusJakartaSans_600SemiBold',
+  bold: 'PlusJakartaSans_700Bold',
+  heavy: 'PlusJakartaSans_800ExtraBold',
+};

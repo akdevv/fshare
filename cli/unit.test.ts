@@ -35,6 +35,15 @@ test("progress line: one line, totals across files", () => {
   assert.match(plain(ui.progress(120)!), /⇅ 2 files .* 25%/);
 });
 
+test("confirm line names the files and who gets them", () => {
+  const ui = new UI();
+  assert.equal(ui.confirm(), null);
+  ui.pending = { label: "trip", count: 12, size: 48e6, commit: () => {} };
+  assert.match(plain(ui.confirm()!), /Send trip \(12 files\) · 48\.0 MB to the next phone that connects\?.*y send · n cancel/);
+  ui.seen("Galaxy S23", true);
+  assert.match(plain(ui.confirm()!), /to Galaxy S23\?/);
+});
+
 test("frames round-trip, split across and packed into transfers", () => {
   const got: [number, number, string][] = [];
   const read = frameReader((type, id, data) => got.push([type, id, data.toString()]));

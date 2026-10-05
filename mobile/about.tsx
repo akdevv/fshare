@@ -24,11 +24,12 @@ type Row = { k: string; v: string; mono?: boolean; warn?: boolean };
 export function About({ open, onClose, laptop, usb, host, outdated, kind }: Props) {
   const [s, t] = useStyles(styles);
   const version = Constants.expoConfig?.version ?? '1.0.0';
+  const build = Platform.OS === 'ios' ? Constants.expoConfig?.ios?.buildNumber : Constants.expoConfig?.android?.versionCode;
   const connection: Row[] = [
     { k: kind === 'laptop' ? 'Laptop' : 'Phone', v: laptop },
-    { k: 'Connected over', v: usb ? 'USB cable' : 'Wi-Fi' },
+    { k: 'Connection', v: usb ? 'USB cable' : 'Wi-Fi' },
     ...(usb ? [] : [{ k: 'Address', v: host.replace(/^http:\/\//, ''), mono: true }]),
-    ...(kind === 'laptop' ? [{ k: 'Laptop app', v: outdated ? 'Restart fshare' : 'Up to date', warn: outdated }] : []),
+    ...(outdated ? [{ k: 'Laptop app', v: 'Restart fshare to update', warn: true }] : []),
   ];
   const phone: Row[] = [
     { k: 'Name', v: myName },
@@ -47,8 +48,15 @@ export function About({ open, onClose, laptop, usb, host, outdated, kind }: Prop
           <View key={r.k} style={s.row}>
             {j > 0 && <View style={s.sep} />}
             <Text style={s.key}>{r.k}</Text>
-            <Text style={[s.value, r.mono && s.mono, r.warn && { color: t.amber }]} numberOfLines={1} selectable>
-              {r.v}
+            <Text style={[s.value, r.mono && s.addr, r.warn && { color: t.amber }]} numberOfLines={1} selectable>
+              {r.mono ? (
+                <>
+                  {r.v.replace(/:\d+$/, '')}
+                  <Text style={{ color: t.faint }}>{r.v.match(/:\d+$/)?.[0]}</Text>
+                </>
+              ) : (
+                r.v
+              )}
             </Text>
           </View>
         ))}
@@ -87,19 +95,22 @@ export function About({ open, onClose, laptop, usb, host, outdated, kind }: Prop
             <Animated.View entering={rise(0)} style={s.hero}>
               <Image source={require('./assets/icon.png')} style={s.icon} accessibilityIgnoresInvertColors />
               <Text style={s.name}>fshare</Text>
-              <Text style={s.tagline}>Fast file transfer between your devices</Text>
+              <Text style={s.tagline}>Send files between your phone, laptop and other phones</Text>
               <View style={s.version}>
-                <Text style={s.versionText}>Version {version}</Text>
+                <Text style={s.versionText}>
+                  Version {version}
+                  {build ? ` (${build})` : ''}
+                </Text>
               </View>
             </Animated.View>
 
-            {group('Connection', connection, 1)}
+            {group('Connected to', connection, 1)}
             {group('This phone', phone, 2)}
 
             <Animated.View entering={rise(3)} style={s.note}>
               <Ionicons name="lock-closed-outline" size={15} color={t.dim} />
               <Text style={s.noteText}>
-                Files go straight from one device to the other, over your cable or local network. Nothing is uploaded anywhere.
+                Files go straight between your devices over the cable or your Wi-Fi. Nothing passes through a server.
               </Text>
             </Animated.View>
           </ScrollView>
@@ -144,7 +155,8 @@ const styles = (t: Theme) =>
     sep: { position: 'absolute', top: 0, left: 16, right: 0, height: StyleSheet.hairlineWidth, backgroundColor: t.line },
     key: { color: t.dim, fontSize: 15 },
     value: { color: t.text, fontSize: 15, fontWeight: '600', flexShrink: 1, textAlign: 'right' },
-    mono: { fontFamily: process.env.EXPO_OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 14, fontWeight: '500' },
+    // same face as the rest; even-width digits keep addresses tidy
+    addr: { fontWeight: '600', fontVariant: ['tabular-nums'], letterSpacing: 0.2 },
 
     note: { flexDirection: 'row', gap: 10, paddingHorizontal: 4 },
     noteText: { flex: 1, color: t.dim, fontSize: 13, lineHeight: 19 },
