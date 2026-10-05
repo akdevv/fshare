@@ -35,7 +35,7 @@ jobs:
         working-directory: mobile
 
   cli:
-    name: CLI on Node ${{ matrix.node }}
+    name: CLI on Node ${{ matrix.node }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
