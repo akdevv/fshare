@@ -1,0 +1,41 @@
+{
+  "name": "fshare-cli",
+  "version": "0.2.0",
+  "description": "Fast file transfer between your computer and phone, over USB cable or Wi-Fi.",
+  "keywords": [
+    "file-transfer",
+    "airdrop",
+    "android",
+    "usb",
+    "wifi",
+    "cli"
+  ],
+  "license": "MIT",
+  "author": "akdevv",
+  "type": "module",
+  "bin": {
+    "fshare": "./dist/fshare.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20.12"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "tsc -p tsconfig.build.json",
+    "dev": "node fshare.ts",
+    "typecheck": "tsc",
+    "test": "node --test --test-timeout=30000",
+    "smoke": "node dist/fshare.js --help"
+  },
+  "dependencies": {
+    "qrcode-terminal": "^0.12.0",
+    "usb": "^3.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

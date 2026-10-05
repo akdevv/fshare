@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- a phone that switched into Android Open Accessory mode (Google's VID, AOA PIDs) -->
+  <usb-device vendor-id="6353" product-id="11520" />
+  <usb-device vendor-id="6353" product-id="11521" />
+</resources>

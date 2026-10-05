@@ -1,0 +1,104 @@
+# Runs on every pull request and every push to main. Branch protection on main requires these
+# jobs to pass before a PR can merge.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Format, lint, types, tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            cli/package-lock.json
+            mobile/package-lock.json
+      - run: npm run setup
+      - run: npm run format:check
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - name: Expo doctor
+        run: npx expo-doctor
+        working-directory: mobile
+
+  cli:
+    name: CLI on Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, node: 22 }
+          - { os: ubuntu-latest, node: 24 }
+          - { os: macos-latest, node: 24 }
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: cli/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - name: Packs and runs like a real install
+        run: |
+          npm pack --pack-destination "$RUNNER_TEMP"
+          mkdir "$RUNNER_TEMP/try" && cd "$RUNNER_TEMP/try" && npm init -y > /dev/null
+          npm i "$RUNNER_TEMP"/fshare-cli-*.tgz
+          npx fshare --help | grep -q "fast file transfer"
+
+  cli-oldest-node:
+    # the published CLI is plain JS and must run on Node 20; the tests themselves need 22+
+    name: CLI runs on Node 20
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - run: npm ci && npm run build
+        working-directory: cli
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: node cli/dist/fshare.js --help | grep -q "fast file transfer"
+
+  android:
+    name: Android APK builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+      - uses: gradle/actions/setup-gradle@v4
+      - run: npm ci
+        working-directory: mobile
+      - run: npx expo prebuild -p android --no-install
+        working-directory: mobile
+      - run: ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a --console=plain
+        working-directory: mobile/android
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fshare-apk-${{ github.sha }}
+          path: mobile/android/app/build/outputs/apk/release/app-release.apk
+          retention-days: 14
