@@ -3,6 +3,8 @@ import Network
 
 typealias Emit = (String, [String: Any?]) -> Void
 
+let keepParts: TimeInterval = 5 * 60 // how long a half-received file waits for the sender to resume
+
 // The receiving half of fshare on an iPhone. Same HTTP as PeerServer.kt on Android (and the laptop
 // CLI), so any phone sends here with the upload code it already has:
 //   POST /hello?name=&port=&token=&id= Wi-Fi pairing: asks the user here to accept, then returns the token
@@ -31,7 +33,23 @@ final class PeerServer {
 
   func start() {
     try? FileManager.default.createDirectory(at: parts, withIntermediateDirectories: true)
-    q.async { self.listen() }
+    q.async { self.listen(); self.sweep() }
+  }
+
+  // A stopped upload's part waits `keepParts` for the sender to retry and pick up where it left off;
+  // older ones are dropped. Runs every minute while the server is up.
+  private func sweep() {
+    guard !stopped else { return }
+    let fm = FileManager.default
+    let busy = Set(uploads.keys.map { part($0).lastPathComponent })
+    let files = (try? fm.contentsOfDirectory(at: parts, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+    for f in files where !busy.contains(f.lastPathComponent) {
+      let changed = (try? f.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+      if Date().timeIntervalSince(changed) > keepParts, (try? fm.removeItem(at: f)) != nil {
+        emit("stopped", ["id": f.lastPathComponent, "reason": "expired"])
+      }
+    }
+    q.asyncAfter(deadline: .now() + 60) { [weak self] in self?.sweep() }
   }
 
   func stop() {

@@ -2,7 +2,7 @@
   "expo": {
     "name": "fshare",
     "slug": "fshare",
-    "version": "1.0.0",
+    "version": "1.0.7",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
@@ -18,8 +18,7 @@
         "LSSupportsOpeningDocumentsInPlace": true,
         "NSBonjourServices": ["_fshare._tcp"]
       },
-      "buildNumber": "10000",
-      "icon": "./assets/fshare.icon"
+      "buildNumber": "10007"
     },
     "android": {
       "adaptiveIcon": {
@@ -30,7 +29,7 @@
       },
       "predictiveBackGestureEnabled": false,
       "package": "dev.akdevv.fshare",
-      "versionCode": 10000
+      "versionCode": 10007
     },
     "web": {
       "favicon": "./assets/favicon.png"

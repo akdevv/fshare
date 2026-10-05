@@ -1,7 +1,22 @@
 // Pure helpers and the USB accessory tunnel (driven by a fake phone, no hardware needed).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { clip, createServer, encodeFrame, FRAME, frameReader, parsePaths, tunnel, UI, usbParts } from "./fshare.ts";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import {
+  clip,
+  createServer,
+  sweepParts,
+  switchToAccessory,
+  encodeFrame,
+  FRAME,
+  frameReader,
+  parsePaths,
+  tunnel,
+  UI,
+  usbParts,
+} from "./fshare.ts";
 
 const plain = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, ""); // eslint-disable-line no-control-regex
 
@@ -129,4 +144,36 @@ test("accessory tunnel: the phone reaches this server over the cable", async () 
     await done;
     server.close();
   }
+});
+
+test("sweepParts drops stale parts but keeps fresh and in-flight ones", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fshare-sweep-"));
+  const old = path.join(dir, "old"),
+    busy = path.join(dir, "busy"),
+    fresh = path.join(dir, "fresh");
+  for (const f of [old, busy, fresh]) fs.writeFileSync(f, "x");
+  const past = new Date(Date.now() - 10 * 60_000);
+  fs.utimesSync(old, past, past);
+  fs.utimesSync(busy, past, past);
+  sweepParts(dir, new Set([busy]));
+  assert.deepEqual(fs.readdirSync(dir).sort(), ["busy", "fresh"]);
+  fs.rmSync(dir, { recursive: true });
+});
+
+test("switchToAccessory sends the AOA strings and the start request, each with a buffer", async () => {
+  const sent: [number, number][] = [];
+  const phone = {
+    open: async () => {},
+    close: async () => {},
+    controlTransferIn: async () => ({ status: "ok", data: new DataView(new Uint16Array([2]).buffer) }),
+    controlTransferOut: async (setup: { request: number; index: number }, data?: Uint8Array) => {
+      if (!data) throw new TypeError("Cannot read properties of undefined (reading 'buffer')"); // what node-usb does
+      sent.push([setup.request, setup.index]);
+    },
+  };
+  await switchToAccessory(phone);
+  assert.deepEqual(
+    sent.map(([r]) => r),
+    [52, 52, 52, 52, 52, 52, 53],
+  );
 });

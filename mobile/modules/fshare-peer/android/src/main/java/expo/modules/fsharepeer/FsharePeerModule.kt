@@ -43,11 +43,17 @@ class FsharePeerModule : Module() {
       nearby?.run { unannounce(); announce(name, SERVER_PORT, id, !visible) }
     }
 
+    // on: start or update the ongoing "keep running" notification; off: stop it
+    Function("background") { on: Boolean, title: String, text: String, progress: Int ->
+      if (on) TransferService.show(context, title, text, progress) else TransferService.hide(context)
+    }
+
     Function("answerPair") { id: String, ok: Boolean -> server?.answer(id, ok) }
     Function("cancel") { id: String -> server?.cancel(id) }
 
     OnDestroy {
       server?.stop(); nearby?.stop(); tunnel?.stop()
+      TransferService.hide(context)
       server = null; nearby = null; tunnel = null
     }
   }

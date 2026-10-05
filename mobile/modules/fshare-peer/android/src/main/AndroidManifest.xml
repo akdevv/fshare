@@ -1,7 +1,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
   <uses-feature android:name="android.hardware.usb.host" android:required="false" />
   <uses-feature android:name="android.hardware.usb.accessory" android:required="false" />
+  <!-- keep transfers going while the app is minimized (TransferService), and say when they finish -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
   <application>
+    <service android:name="expo.modules.fsharepeer.TransferService" android:exported="false" android:foregroundServiceType="dataSync" />
     <!-- Phone-to-phone cable: when the other phone shows up as an fshare USB link, Android offers
          to open fshare (with "always"), which also grants USB access without another prompt. -->
     <activity

@@ -12,6 +12,9 @@ export type Prefs = {
   onboarded?: boolean;
   hidden?: boolean; // not listed on other phones, and they can't ask to pair
   peers?: SavedPeer[];
+  name?: string; // what other devices see; the system's name until changed
+  notify?: boolean; // finished-transfer notifications (default on)
+  keepAlive?: boolean; // keep running while minimized (default on)
 };
 
 // a phone paired over Wi-Fi; `base` is where it was last seen (its address can change)
