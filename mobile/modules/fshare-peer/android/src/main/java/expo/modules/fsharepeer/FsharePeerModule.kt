@@ -1,5 +1,6 @@
 package expo.modules.fsharepeer
 
+import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import expo.modules.kotlin.exception.Exceptions
@@ -13,6 +14,7 @@ class FsharePeerModule : Module() {
   private var nearby: Nearby? = null
   private var tunnel: UsbTunnel? = null
   private var me: Triple<String, String, Boolean>? = null
+  private var pairing: Seal.Pairing? = null
 
   private val context get() = appContext.reactContext ?: throw Exceptions.ReactContextLost()
 
@@ -46,6 +48,37 @@ class FsharePeerModule : Module() {
     // on: start or update the ongoing "keep running" notification; off: stop it
     Function("background") { on: Boolean, title: String, text: String, progress: Int ->
       if (on) TransferService.show(context, title, text, progress) else TransferService.hide(context)
+    }
+
+    // end-to-end encryption (Seal.kt): the app signs its requests and seals/opens what it sends
+    Function("sign") { token: String, msg: String -> Seal.sign(token, msg) }
+    Function("seal") { token: String, text: String -> Seal.seal(token, text.toByteArray()) }
+    Function("open") { token: String, sealed: String -> Seal.openText(token, sealed) }
+    AsyncFunction("sealFile") { token: String, src: String, dst: String, seed: String ->
+      val from = File(Uri.parse(src).path!!)
+      File(Uri.parse(dst).path!!).outputStream().buffered(1 shl 18).use { out ->
+        from.inputStream().buffered(1 shl 18).use { Seal.sealFile(token, it, from.length(), out, seed) }
+      }
+      Seal.sealedSize(from.length()).toDouble()
+    }
+    AsyncFunction("openFile") { token: String, src: String, dst: String ->
+      val to = File(Uri.parse(dst).path!!)
+      try {
+        to.outputStream().buffered(1 shl 18).use { out ->
+          File(Uri.parse(src).path!!).inputStream().buffered(1 shl 18).use { Seal.openFile(token, it, out) }
+        }.toDouble()
+      } catch (e: Exception) {
+        to.delete()
+        throw e
+      }
+    }
+    // pairing with another phone: pairStart() gives our public key, pairFinish(theirs) the shared
+    // secret and the code both screens show
+    Function("pairStart") { Seal.Pairing().also { pairing = it }.pub }
+    Function("pairFinish") { theirPub: String ->
+      val (secret, code) = (pairing ?: throw IllegalStateException("pairStart first")).finish(theirPub)
+      pairing = null
+      mapOf("secret" to secret, "code" to code)
     }
 
     Function("answerPair") { id: String, ok: Boolean -> server?.answer(id, ok) }

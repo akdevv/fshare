@@ -11,7 +11,7 @@ import { eta, fileIcon, fmt, haptic, rate, useStyles, type Theme } from './theme
 import { Bar, Cookie, Pop, Press, Ring, ThemeToggle } from './ui';
 import { Peer, type Found } from './modules/fshare-peer';
 import { DevicesScreen } from './connect';
-import { me } from './identity';
+import { client, openList, signed } from './identity';
 import { openFile } from './open';
 import { Preferences } from './settings';
 
@@ -41,7 +41,6 @@ type Job = {
 };
 type Link = 'connecting' | 'online' | 'offline' | 'none';
 
-const client = () => ({ 'x-fshare-client': encodeURIComponent(me.name) }); // lets the other side show who's connected
 const PARALLEL = 3; // a few streams at once keeps the link busy with many small files
 const LIVE: State[] = ['queued', 'preparing', 'active', 'paused', 'saving'];
 const CANCELLABLE: State[] = ['queued', 'preparing', 'active', 'paused'];
@@ -120,7 +119,7 @@ export function Session({
   const usb = device.via === 'usb';
   const [link, setLink] = useState<Link>('connecting');
   const [laptop, setLaptop] = useState(device.name);
-  const [outdated, setOutdated] = useState(false); // laptop runs an fshare without name/resume support
+  const [outdated, setOutdated] = useState(false); // laptop runs an fshare from before encryption
   const [jobs, setJobs] = useState<Job[]>([]);
   const [speed, setSpeed] = useState({ up: 0, down: 0 });
   const [saveDir, setSaveDir] = useState(getSaveDir);
@@ -134,9 +133,8 @@ export function Session({
   const jobsRef = useRef(jobs);
   jobsRef.current = jobs;
 
-  // `c` tells the laptop which phone this is, so it hands each file to each phone once
-  const urlFor = (d: Device, p: string) => `${d.base}${p}${p.includes('?') ? '&' : '?'}t=${d.token}&c=${me.id}`;
-  const url = (p: string) => urlFor(server, p);
+  // signed with the device's token; `c` tells the laptop which phone this is, so it hands each file to each phone once
+  const url = (p: string, method = 'GET') => signed(server, p, method);
 
   // What the laptop shares downloads by itself: poll its list and fetch anything new.
   const requested = useRef(new Set<string>()); // files we've already started, by laptop + id
@@ -162,15 +160,17 @@ export function Session({
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), 3000);
       try {
-        const r = await fetch(url('/list'), { signal: ctrl.signal, headers: client() });
+        const r = await fetch(url('/list'), { signal: ctrl.signal, headers: client(server.token) });
+        // an fshare from before encryption refuses signed requests and doesn't say its version
+        if (alive) setOutdated(r.status === 403 && Number(r.headers.get('x-fshare-version') ?? 0) < 3);
         if (!r.ok) throw new Error();
-        const list = await r.json();
-        const name = r.headers.get('x-fshare-name');
+        const reply = openList(server.token, await r.text());
+        if (!reply) throw new Error(); // not sealed with this token: not the device we paired with
+        const name = reply.name;
         if (alive) {
-          autoGet.current(list);
+          autoGet.current(reply.files);
           setLink('online');
-          if (name) setLaptop(decodeURIComponent(name));
-          setOutdated(!r.headers.get('x-fshare-version'));
+          if (name) setLaptop(name);
         }
       } catch {
         if (alive) setLink('offline');
@@ -343,7 +343,7 @@ export function Session({
         async () => {
           const on = progress(key, 'down');
           tmpDir.create({ intermediates: true, idempotent: true });
-          const tmp = new File(tmpDir, r.path.split('/').pop()!);
+          const tmp = new File(tmpDir, '.sealed'); // what comes over the wire; opened once it's all here
           const start = () => {
             const task = File.createDownloadTask(url(`/file/${r.id}`), tmp, {
               onProgress: ({ bytesWritten, totalBytes }) => on(bytesWritten, totalBytes),
@@ -380,7 +380,10 @@ export function Session({
           }
           if (stopped.current.has(key)) throw new Error('cancelled');
           patch(key, { state: 'saving', done: r.size });
-          const saved = await saveInto(root, tmp, r.path);
+          const plain = new File(tmpDir, r.path.split('/').pop()!);
+          await Peer!.openFile(server.token, tmp.uri, plain.uri); // rejects anything tampered with or cut short
+          tmp.delete();
+          const saved = await saveInto(root, plain, r.path);
           tmpDir.delete();
           patch(key, { state: 'done', file: saved });
         },
@@ -398,7 +401,7 @@ export function Session({
   // `to` defaults to the device on screen; the share-sheet confirm can pick another one
   // `again`: a retry of one file under its old id, so the other side carries on where it stopped
   const upload = async (files: File[], to: Device = server, again?: string) => {
-    const url = (p: string) => urlFor(to, p);
+    const url = (p: string, method = 'GET') => signed(to, p, method);
     const toName = to.id === server.id ? laptop : to.name;
     const batch = files.map((f, i) => ({ f, key: again ?? `u${Date.now()}-${i}` }));
     if (again) stopped.current.delete(again);
@@ -434,9 +437,17 @@ export function Session({
           if (stopped.current.has(key)) throw new Error('cancelled');
           patch(key, { state: 'active', name: src.name });
         }
+        // sealed for `to` before it leaves the phone; the same id always seals to the same bytes, so a
+        // retry carries on from what the other side kept
+        patch(key, { state: 'preparing' });
+        tmpDir.create({ intermediates: true, idempotent: true });
+        const sealed = new File(tmpDir, '.sealed');
+        await Peer!.sealFile(to.token, src.uri, sealed.uri, key);
+        if (stopped.current.has(key)) throw new Error('cancelled');
+        patch(key, { state: 'active' });
         const on = progress(key, 'up');
-        const size = src.size;
-        const forget = () => fetch(url(`/upload?id=${key}`), { method: 'DELETE' }).catch(() => {}); // laptop forgets the part
+        const size = sealed.size;
+        const forget = () => fetch(url(`/upload?id=${key}`, 'DELETE'), { method: 'DELETE' }).catch(() => {}); // laptop forgets the part
         // a retry picks up what the other side kept (it holds a stopped upload for 5 minutes)
         let offset = again
           ? await fetch(url(`/upload?id=${key}`))
@@ -461,10 +472,11 @@ export function Session({
           });
           try {
             // resuming: upload only the bytes the laptop doesn't have yet
-            const body = offset ? tail(src, offset, tmpDir) : src;
-            const r = await body.upload(url(`/upload?name=${encodeURIComponent(src.name)}&id=${key}&offset=${offset}&size=${size}`), {
+            const body = offset ? tail(sealed, offset, tmpDir) : sealed;
+            const name = Peer!.seal(to.token, src.name); // base64url: safe in a URL as is
+            const r = await body.upload(url(`/upload?name=${name}&id=${key}&offset=${offset}&size=${size}`, 'PUT'), {
               httpMethod: 'PUT',
-              headers: client(),
+              headers: client(to.token),
               signal: ctrl.signal,
               onProgress: ({ bytesSent }) => on(offset + bytesSent, size),
             });
@@ -848,8 +860,8 @@ export function Session({
                   </Text>
                 </Animated.View>
               </Pop>
-              {outdated && online && device.kind === 'laptop' && (
-                <Text style={[st.meta, { color: t.amber, fontSize: 12 }]}>Restart fshare on your laptop to update it</Text>
+              {outdated && device.kind === 'laptop' && (
+                <Text style={[st.meta, { color: t.amber, fontSize: 12 }]}>Update fshare on your laptop to connect</Text>
               )}
             </View>
           </Press>

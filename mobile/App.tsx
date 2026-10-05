@@ -12,7 +12,7 @@ import { Onboarding } from './onboarding';
 import { Splash } from './splash';
 import { CABLE, Peer, SERVER_PORT, type Found } from './modules/fshare-peer';
 import { ConnectScreen } from './connect';
-import { me } from './identity';
+import { client, me, openList, signed } from './identity';
 import { Ionicons } from '@expo/vector-icons';
 import { haptic, ThemeProvider, useStyles, useTheme, type Theme } from './theme';
 import Animated, { Easing, FadeInDown, ReduceMotion, useReducedMotion } from 'react-native-reanimated';
@@ -168,7 +168,8 @@ function Root() {
             <PairCard
               them={r.name}
               line="wants to connect"
-              note="You'll be able to send files to each other. Only accept phones you know."
+              code={r.code}
+              note={`Accept only if ${r.name} shows the same code.`}
               actions={[
                 { label: 'Decline', onPress: () => answer(false) },
                 { label: 'Accept', primary: true, onPress: () => answer(true) },
@@ -191,15 +192,12 @@ function Root() {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 1500);
       try {
-        const r = await fetch(`${base}/list?t=${token}`, {
-          signal: ctrl.signal,
-          headers: { 'x-fshare-client': encodeURIComponent(me.name) },
-        });
+        const r = await fetch(signed({ base, token }, '/list'), { signal: ctrl.signal, headers: client(token) });
+        // a laptop on an fshare from before encryption: still show it, so the main screen can say to update
+        if (r.status === 403 && !r.headers.get('x-fshare-version')) return { name: 'Laptop', kind: 'laptop' as const, old: true };
         if (!r.ok) return null;
-        return {
-          name: decodeURIComponent(r.headers.get('x-fshare-name') ?? '') || 'Device',
-          kind: r.headers.get('x-fshare-kind') === 'phone' ? ('phone' as const) : ('laptop' as const),
-        };
+        const reply = openList(token, await r.text()); // only the device holding this token can seal it
+        return reply && { name: reply.name || 'Device', kind: reply.kind === 'phone' ? ('phone' as const) : ('laptop' as const) };
       } catch {
         return null;
       } finally {
@@ -279,42 +277,53 @@ function Root() {
       closeLabel: 'Got it',
     });
 
-  // ask a nearby phone to connect; its owner sees "<this phone> wants to connect"
+  // ask a nearby phone to connect. Both phones swap keys first and show the same 6-digit code;
+  // its owner compares it with ours and accepts. Tokens then travel sealed with the shared secret.
   const pair = async (f: Found) => {
     haptic.tap();
     const ctrl = new AbortController();
-    setSheet({
-      title: '',
-      actions: [],
-      hideClose: true,
-      extra: (
-        <PairCard
-          them={f.name}
-          line="Waiting for them to accept"
-          note={`Tap Accept on ${f.name} to connect.`}
-          waiting
-          actions={[
-            {
-              label: 'Cancel',
-              onPress: () => {
-                ctrl.abort();
-                setSheet(null);
+    const waiting = (code?: string) =>
+      setSheet({
+        title: '',
+        actions: [],
+        hideClose: true,
+        extra: (
+          <PairCard
+            them={f.name}
+            line="Waiting for them to accept"
+            code={code}
+            note={code ? `Check ${f.name} shows this code, then tap Accept there.` : 'Connecting…'}
+            waiting
+            actions={[
+              {
+                label: 'Cancel',
+                onPress: () => {
+                  ctrl.abort();
+                  setSheet(null);
+                },
               },
-            },
-          ]}
-        />
-      ),
-      onCancel: () => ctrl.abort(),
-    });
-    const timer = setTimeout(() => ctrl.abort(), 65000);
+            ]}
+          />
+        ),
+        onCancel: () => ctrl.abort(),
+      });
+    waiting();
+    const timer = setTimeout(() => ctrl.abort(), 70000);
     try {
+      if (!Peer) throw new Error('no peer module');
       const base = `http://${f.host}:${f.port}`;
-      const r = await fetch(`${base}/hello?name=${encodeURIComponent(me.name)}&port=${SERVER_PORT}&token=${me.token}&id=${me.id}`, {
+      const hi = await fetch(`${base}/hello?name=${encodeURIComponent(me.name)}&port=${SERVER_PORT}&id=${me.id}&pub=${Peer.pairStart()}`, {
         method: 'POST',
         signal: ctrl.signal,
       });
-      if (!r.ok) throw new Error('declined');
-      const p = { id: f.id || f.host, name: f.name, token: await r.text(), base };
+      if (!hi.ok) throw new Error('refused');
+      const { id, pub } = await hi.json();
+      const { secret, code } = Peer.pairFinish(pub);
+      if (sheetOpen.current) waiting(code);
+      const r = await fetch(`${base}/hello?wait=${id}&token=${Peer.seal(secret, me.token)}`, { method: 'POST', signal: ctrl.signal });
+      const token = r.ok && Peer.open(secret, await r.text());
+      if (!token) throw new Error('declined');
+      const p = { id: f.id || f.host, name: f.name, token, base };
       remember(p);
       const d = phone(p);
       setDevices((ds) => [...ds.filter((x) => x.id !== d.id), d]);
@@ -441,12 +450,14 @@ function PairCard({
   them,
   line,
   note,
+  code,
   waiting,
   actions,
 }: {
   them: string;
   line: string;
   note: string;
+  code?: string; // the 6 digits both phones show while pairing
   waiting?: boolean;
   actions: { label: string; primary?: boolean; onPress: () => void }[];
 }) {
@@ -484,6 +495,11 @@ function PairCard({
         </Text>
         <Text style={st.pairLine}>{line}</Text>
       </View>
+      {code !== undefined || waiting ? (
+        <View style={st.pairCode} accessible accessibilityLabel={code ? `Code ${code.split('').join(' ')}` : 'Making a code'}>
+          <Text style={[st.pairCodeText, !code && { color: t.faint }]}>{code ? `${code.slice(0, 3)} ${code.slice(3)}` : '··· ···'}</Text>
+        </View>
+      ) : null}
       <Text style={st.pairNote}>{note}</Text>
       <Text style={st.pairMe} numberOfLines={1}>
         You appear as {me.name}
@@ -753,6 +769,14 @@ const styles = (t: Theme) =>
     pairDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: t.accent },
     pairName: { color: t.text, fontSize: 22, fontWeight: '700', letterSpacing: -0.4, maxWidth: 300 },
     pairLine: { color: t.dim, fontSize: 15 },
+    pairCode: {
+      paddingHorizontal: 22,
+      paddingVertical: 10,
+      borderRadius: 16,
+      borderCurve: 'continuous',
+      backgroundColor: t.surface2,
+    },
+    pairCodeText: { color: t.text, fontSize: 30, fontFamily: 'JetBrainsMono_500Medium', letterSpacing: 2, fontVariant: ['tabular-nums'] },
     pairNote: { color: t.dim, fontSize: 14, lineHeight: 20, textAlign: 'center', paddingHorizontal: 16 },
     pairMe: { color: t.faint, fontSize: 12.5 },
     pairButtons: { flexDirection: 'row', gap: 10, alignSelf: 'stretch', marginTop: 8 },

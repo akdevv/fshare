@@ -7,6 +7,7 @@ public class FsharePeerModule: Module {
   private var server: PeerServer?
   private var nearby: Nearby?
   private var task: UIBackgroundTaskIdentifier = .invalid
+  private var pairing: Seal.Pairing?
 
   public func definition() -> ModuleDefinition {
     Name("FsharePeer")
@@ -36,6 +37,38 @@ public class FsharePeerModule: Module {
           self.endTask()
         }
       }
+    }
+
+    // end-to-end encryption (Seal.swift): the app signs its requests and seals/opens what it sends
+    Function("sign") { (token: String, msg: String) in Seal.sign(token, msg) }
+    Function("seal") { (token: String, text: String) in Seal.seal(token, Data(text.utf8)) }
+    Function("open") { (token: String, sealed: String) -> String? in Seal.openText(token, sealed) }
+    AsyncFunction("sealFile") { (token: String, src: URL, dst: URL, seed: String) -> Double in
+      try Seal.sealFile(token, from: src, to: dst, seed: seed)
+      let size = (try FileManager.default.attributesOfItem(atPath: src.path)[.size] as? NSNumber)?.int64Value ?? 0
+      return Double(Seal.sealedSize(size))
+    }
+    AsyncFunction("openFile") { (token: String, src: URL, dst: URL) -> Double in
+      do {
+        try Seal.openFile(token, from: src, to: dst)
+      } catch {
+        try? FileManager.default.removeItem(at: dst)
+        throw error
+      }
+      return (try FileManager.default.attributesOfItem(atPath: dst.path)[.size] as? NSNumber)?.doubleValue ?? 0
+    }
+    // pairing with another phone: pairStart() gives our public key, pairFinish(theirs) the shared
+    // secret and the code both screens show
+    Function("pairStart") { () -> String in
+      let p = Seal.Pairing()
+      self.pairing = p
+      return p.pub
+    }
+    Function("pairFinish") { (theirPub: String) -> [String: String] in
+      guard let p = self.pairing else { throw Seal.Failure.bad }
+      self.pairing = nil
+      let (secret, code) = try p.finish(theirPub)
+      return ["secret": secret, "code": code]
     }
 
     Function("answerPair") { (id: String, ok: Bool) in self.server?.answer(id, ok) }

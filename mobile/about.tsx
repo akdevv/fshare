@@ -54,7 +54,7 @@ function Page({ onClose, laptop, usb, host, outdated, kind }: Props) {
     { icon: kind === 'laptop' ? 'laptop-outline' : 'phone-portrait-outline', k: kind === 'laptop' ? 'Laptop' : 'Phone', v: laptop },
     { icon: usb ? 'flash-outline' : 'wifi-outline', k: 'Connection', v: usb ? 'USB cable' : 'Wi-Fi' },
     ...(usb ? [] : [{ icon: 'globe-outline' as Icon, k: 'Address', v: host.replace(/^http:\/\//, ''), addr: true }]),
-    ...(outdated ? [{ icon: 'refresh-outline' as Icon, k: 'Laptop app', v: 'Restart fshare to update', warn: true }] : []),
+    ...(outdated ? [{ icon: 'refresh-outline' as Icon, k: 'Laptop app', v: 'Update fshare to connect', warn: true }] : []),
   ];
   const phone: Row[] = [
     { icon: 'phone-portrait-outline', k: 'Name', v: myName },

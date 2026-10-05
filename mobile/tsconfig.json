@@ -4,5 +4,5 @@
     "strict": true,
     "types": ["jest", "node"]
   },
-  "exclude": ["node_modules", "android", "ios", "modules/*/android"]
+  "exclude": ["node_modules", "android", "ios", "modules/*/android", "modules/*/test"]
 }
