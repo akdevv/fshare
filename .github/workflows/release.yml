@@ -1,11 +1,11 @@
-# Releases are driven by tags, created with `npm run release` (see scripts/release.mjs):
-#   cli-v1.2.3  -> publish fshare-cli@1.2.3 to npm + GitHub release
-#   app-v1.2.3  -> build the APK + GitHub release with the APK attached
+# CLI releases: `npm run release:publish -- cli` pushes a cli-v1.2.3 tag, and this publishes
+# fshare-cli@1.2.3 to npm and creates the GitHub release. (APK releases are built and uploaded
+# from your Mac by the same script, so there's no app job here.)
 name: Release
 
 on:
   push:
-    tags: ['cli-v*', 'app-v*']
+    tags: ['cli-v*']
 
 permissions:
   contents: write
@@ -40,45 +40,5 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: GitHub release
         run: gh release create "${{ github.ref_name }}" --title "CLI ${GITHUB_REF_NAME#cli-}" --generate-notes
-        env:
-          GH_TOKEN: ${{ github.token }}
-
-  app:
-    if: startsWith(github.ref_name, 'app-v')
-    runs-on: ubuntu-latest
-    env:
-      KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: mobile/package-lock.json
-      - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: 17 }
-      - uses: gradle/actions/setup-gradle@v4
-      - name: Tag matches app.json
-        working-directory: mobile
-        run: test "app-v$(node -p 'require("./app.json").expo.version')" = "${{ github.ref_name }}"
-      - run: npm ci
-        working-directory: mobile
-      - run: npm test
-        working-directory: mobile
-      - name: Release signing key (optional; without it the APK is debug-signed)
-        if: env.KEYSTORE != ''
-        run: echo "$KEYSTORE" | base64 -d > "$RUNNER_TEMP/release.keystore" && echo "FSHARE_KEYSTORE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
-      - run: npx expo prebuild -p android --no-install
-        working-directory: mobile
-      - run: ./gradlew assembleRelease --console=plain
-        working-directory: mobile/android
-        env:
-          FSHARE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          FSHARE_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          FSHARE_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-      - name: GitHub release with the APK
-        run: |
-          cp mobile/android/app/build/outputs/apk/release/app-release.apk "fshare-${GITHUB_REF_NAME#app-}.apk"
-          gh release create "${{ github.ref_name }}" "fshare-${GITHUB_REF_NAME#app-}.apk" --title "App ${GITHUB_REF_NAME#app-}" --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}
