@@ -1,5 +1,5 @@
-// Signs release APKs with your own key when FSHARE_KEYSTORE is set (CI release job); otherwise
-// they stay debug-signed, which is fine for installing on your own phones.
+// Signs release APKs with your own key when FSHARE_KEYSTORE is set while running `npm run apk`;
+// otherwise they stay debug-signed, which is fine for installing on your own phones.
 // Env: FSHARE_KEYSTORE (path), FSHARE_KEYSTORE_PASSWORD, FSHARE_KEY_ALIAS, FSHARE_KEY_PASSWORD.
 const { withAppBuildGradle } = require('expo/config-plugins');
 

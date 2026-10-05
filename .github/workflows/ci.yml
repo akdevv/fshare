@@ -1,5 +1,6 @@
 # Runs on every pull request and every push to main. Branch protection on main requires these
-# jobs to pass before a PR can merge.
+# jobs to pass before a PR can merge. The APK isn't built here (10+ minutes per run); build it
+# on your Mac with `npm run apk` (see README).
 name: CI
 
 on:
@@ -77,28 +78,3 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 20 }
       - run: node cli/dist/fshare.js --help | grep -q "fast file transfer"
-
-  android:
-    name: Android APK builds
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: mobile/package-lock.json
-      - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: 17 }
-      - uses: gradle/actions/setup-gradle@v4
-      - run: npm ci
-        working-directory: mobile
-      - run: npx expo prebuild -p android --no-install
-        working-directory: mobile
-      - run: ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a --console=plain
-        working-directory: mobile/android
-      - uses: actions/upload-artifact@v4
-        with:
-          name: fshare-apk-${{ github.sha }}
-          path: mobile/android/app/build/outputs/apk/release/app-release.apk
-          retention-days: 14
