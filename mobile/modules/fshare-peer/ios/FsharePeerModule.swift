@@ -1,10 +1,12 @@
 import ExpoModulesCore
+import UIKit
 
 // Phone-to-phone on iPhone: a small fshare server and Bonjour discovery, over Wi-Fi only
 // (iOS gives apps no USB link to another phone).
 public class FsharePeerModule: Module {
   private var server: PeerServer?
   private var nearby: Nearby?
+  private var task: UIBackgroundTaskIdentifier = .invalid
 
   public func definition() -> ModuleDefinition {
     Name("FsharePeer")
@@ -25,6 +27,17 @@ public class FsharePeerModule: Module {
     }
 
     Function("setVisible") { (visible: Bool) in self.server?.setVisible(visible) }
+    // iOS has no long-running service: while files move, ask for background time (a few minutes at most)
+    Function("background") { (on: Bool, _: String, _: String, _: Int) in
+      DispatchQueue.main.async {
+        if on, self.task == .invalid {
+          self.task = UIApplication.shared.beginBackgroundTask(withName: "fshare transfer") { self.endTask() }
+        } else if !on {
+          self.endTask()
+        }
+      }
+    }
+
     Function("answerPair") { (id: String, ok: Bool) in self.server?.answer(id, ok) }
     Function("cancel") { (id: String) in self.server?.cancel(id) }
 
@@ -33,6 +46,13 @@ public class FsharePeerModule: Module {
       self.nearby?.stop()
       self.server = nil
       self.nearby = nil
+      DispatchQueue.main.async { self.endTask() }
     }
+  }
+
+  private func endTask() {
+    guard task != .invalid else { return }
+    UIApplication.shared.endBackgroundTask(task)
+    task = .invalid
   }
 }

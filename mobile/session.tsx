@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Platform, ScrollView, StyleSheet, Text, View, type StyleProp, type ViewStyle } from 'react-native';
+import { AppState, Platform, ScrollView, StyleSheet, Text, View, type StyleProp, type ViewStyle } from 'react-native';
 import Animated, { Easing, FadeIn, FadeOut, LinearTransition, ReduceMotion } from 'react-native-reanimated';
 import { Directory, File, Paths } from 'expo-file-system';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
@@ -8,15 +8,23 @@ import { getSaveDir, label, pickSaveDir, saveInto } from './downloads';
 import { About } from './about';
 import { Sheet, type SheetContent } from './sheet';
 import { eta, fileIcon, fmt, haptic, rate, useStyles, type Theme } from './theme';
-import { Bar, Cookie, Pop, Press, Ring, ThemeToggle, Toggle } from './ui';
-import { myName, Peer, type Found } from './modules/fshare-peer';
+import { Bar, Cookie, Pop, Press, Ring, ThemeToggle } from './ui';
+import { Peer, type Found } from './modules/fshare-peer';
+import { DevicesScreen } from './connect';
 import { me } from './identity';
 import { openFile } from './open';
-import type { SavedPeer } from './prefs';
+import { Preferences } from './settings';
+
+import { askToNotify, notify } from './notify';
+import { readPrefs, type SavedPeer } from './prefs';
 
 // something we can send to: the laptop running fshare, or another phone running this app
 export type Device = { id: string; name: string; base: string; token: string; kind: 'laptop' | 'phone'; via: 'usb' | 'wifi' };
 export type Remote = { id: number; path: string; size: number };
+
+// the main screen before anything is connected (Skip on the waiting screen): history and the
+// devices button work, sending waits for a device
+export const NO_DEVICE: Device = { id: 'none', name: 'Not connected', base: '', token: '', kind: 'phone', via: 'wifi' };
 type State = 'queued' | 'preparing' | 'active' | 'paused' | 'saving' | 'done' | 'cancelled' | 'error';
 type Job = {
   key: string;
@@ -31,9 +39,9 @@ type Job = {
   peer?: string; // the other device's name: where it went, or where it came from
   incoming?: boolean; // pushed to us by another phone: only the sender can pause it
 };
-type Link = 'connecting' | 'online' | 'offline';
+type Link = 'connecting' | 'online' | 'offline' | 'none';
 
-const CLIENT = { 'x-fshare-client': encodeURIComponent(myName) }; // lets the other side show who's connected
+const client = () => ({ 'x-fshare-client': encodeURIComponent(me.name) }); // lets the other side show who's connected
 const PARALLEL = 3; // a few streams at once keeps the link busy with many small files
 const LIVE: State[] = ['queued', 'preparing', 'active', 'paused', 'saving'];
 const CANCELLABLE: State[] = ['queued', 'preparing', 'active', 'paused'];
@@ -83,7 +91,6 @@ export function Session({
   device,
   devices,
   nearby,
-  away,
   saved,
   onForget,
   visible,
@@ -93,11 +100,11 @@ export function Session({
   onPick,
   onPair,
   onWifi,
+  onCable,
 }: {
   device: Device;
   devices: Device[];
   nearby: Found[];
-  away: SavedPeer[];
   saved: SavedPeer[];
   onForget: (p: SavedPeer) => void;
   visible: boolean;
@@ -107,6 +114,7 @@ export function Session({
   onPick: (d: Device) => void;
   onPair: (f: Found) => void;
   onWifi: () => void;
+  onCable: () => void;
 }) {
   const server = device;
   const usb = device.via === 'usb';
@@ -154,7 +162,7 @@ export function Session({
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), 3000);
       try {
-        const r = await fetch(url('/list'), { signal: ctrl.signal, headers: CLIENT });
+        const r = await fetch(url('/list'), { signal: ctrl.signal, headers: client() });
         if (!r.ok) throw new Error();
         const list = await r.json();
         const name = r.headers.get('x-fshare-name');
@@ -169,9 +177,10 @@ export function Session({
       }
       clearTimeout(t);
     };
-    setLink('connecting');
     setLaptop(device.name);
     setOutdated(false);
+    if (device.id === NO_DEVICE.id) return setLink('none');
+    setLink('connecting');
     load();
     const t = setInterval(load, 2000);
     return () => {
@@ -260,8 +269,20 @@ export function Session({
     setTimeout(() => {
       // after the last state update has rendered
       const mine = jobsRef.current.filter((j) => keys.includes(j.key));
-      if (mine.some((j) => j.state === 'error')) haptic.error();
-      else if (mine.some((j) => j.state === 'done')) haptic.success();
+      const failed = mine.filter((j) => j.state === 'error');
+      const done = mine.filter((j) => j.state === 'done');
+      if (failed.length) haptic.error();
+      else if (done.length) haptic.success();
+      // minimized: say how it went (a batch goes one way, to or from one device)
+      const names = (js: Job[]) => summary(js.map((j) => j.name.split('/').pop()!));
+      const up = mine[0]?.dir === 'up';
+      const peer = mine[0]?.peer ?? laptop;
+      if (failed.length)
+        notify(
+          up ? `Couldn't send to ${peer}` : `Couldn't receive from ${peer}`,
+          up ? `${names(failed)}. Open fshare to retry.` : names(failed),
+        );
+      else if (done.length) notify(up ? `Sent to ${peer}` : `Received from ${peer}`, names(done));
     }, 100);
 
   const changeSaveDir = async () => {
@@ -375,10 +396,12 @@ export function Session({
   };
 
   // `to` defaults to the device on screen; the share-sheet confirm can pick another one
-  const upload = async (files: File[], to: Device = server) => {
+  // `again`: a retry of one file under its old id, so the other side carries on where it stopped
+  const upload = async (files: File[], to: Device = server, again?: string) => {
     const url = (p: string) => urlFor(to, p);
     const toName = to.id === server.id ? laptop : to.name;
-    const batch = files.map((f, i) => ({ f, key: `u${Date.now()}-${i}` }));
+    const batch = files.map((f, i) => ({ f, key: again ?? `u${Date.now()}-${i}` }));
+    if (again) stopped.current.delete(again);
     setJobs((js) => [
       ...batch.map(({ f, key }) => ({
         key,
@@ -390,82 +413,84 @@ export function Session({
         peer: toName,
         retry: () => {
           drop(key);
-          upload([f], to);
+          upload([f], to, key);
         },
       })),
       ...js,
     ]);
     await pool(batch, PARALLEL, async ({ f, key }) => {
       const tmpDir = new Directory(Paths.cache, 'fshare-up', key);
-      await run(
-        key,
-        async () => {
-          let src = f;
-          controls.current.set(key, { cancel: () => {} }); // the copy can't be interrupted; checked right after
-          // Android hands us a content:// URI served through the media provider's FUSE layer; the
-          // upload reads it 8 KB at a time (~2-4 MB/s on a Galaxy S23). copy() reads in big chunks,
-          // and the copy also gets the real file name instead of "msf:1000113138".
-          if (!f.uri.startsWith('file:')) {
-            patch(key, { state: 'preparing' });
-            tmpDir.create({ intermediates: true, idempotent: true });
-            await f.copy(tmpDir);
-            src = tmpDir.list()[0] as File;
-            if (stopped.current.has(key)) throw new Error('cancelled');
-            patch(key, { state: 'active', name: src.name });
-          }
-          const on = progress(key, 'up');
-          const size = src.size;
-          const forget = () => fetch(url(`/upload?id=${key}`), { method: 'DELETE' }).catch(() => {}); // laptop forgets the part
-          let offset = 0;
-          for (;;) {
-            const ctrl = new AbortController();
-            let pausing = false;
-            controls.current.set(key, {
-              cancel: () => {
-                ctrl.abort();
-                forget();
-              },
-              pause: () => {
-                pausing = true;
-                ctrl.abort();
-              },
+      await run(key, async () => {
+        let src = f;
+        controls.current.set(key, { cancel: () => {} }); // the copy can't be interrupted; checked right after
+        // Android hands us a content:// URI served through the media provider's FUSE layer; the
+        // upload reads it 8 KB at a time (~2-4 MB/s on a Galaxy S23). copy() reads in big chunks,
+        // and the copy also gets the real file name instead of "msf:1000113138".
+        if (!f.uri.startsWith('file:')) {
+          patch(key, { state: 'preparing' });
+          tmpDir.create({ intermediates: true, idempotent: true });
+          await f.copy(tmpDir);
+          src = tmpDir.list()[0] as File;
+          if (stopped.current.has(key)) throw new Error('cancelled');
+          patch(key, { state: 'active', name: src.name });
+        }
+        const on = progress(key, 'up');
+        const size = src.size;
+        const forget = () => fetch(url(`/upload?id=${key}`), { method: 'DELETE' }).catch(() => {}); // laptop forgets the part
+        // a retry picks up what the other side kept (it holds a stopped upload for 5 minutes)
+        let offset = again
+          ? await fetch(url(`/upload?id=${key}`))
+              .then((r) => r.json())
+              .then((j) => (j.received <= size ? j.received : 0))
+              .catch(() => 0)
+          : 0;
+        on.reset(offset);
+        if (offset) patch(key, { done: offset });
+        for (;;) {
+          const ctrl = new AbortController();
+          let pausing = false;
+          controls.current.set(key, {
+            cancel: () => {
+              ctrl.abort();
+              forget();
+            },
+            pause: () => {
+              pausing = true;
+              ctrl.abort();
+            },
+          });
+          try {
+            // resuming: upload only the bytes the laptop doesn't have yet
+            const body = offset ? tail(src, offset, tmpDir) : src;
+            const r = await body.upload(url(`/upload?name=${encodeURIComponent(src.name)}&id=${key}&offset=${offset}&size=${size}`), {
+              httpMethod: 'PUT',
+              headers: client(),
+              signal: ctrl.signal,
+              onProgress: ({ bytesSent }) => on(offset + bytesSent, size),
             });
-            try {
-              // resuming: upload only the bytes the laptop doesn't have yet
-              const body = offset ? tail(src, offset, tmpDir) : src;
-              const r = await body.upload(url(`/upload?name=${encodeURIComponent(src.name)}&id=${key}&offset=${offset}&size=${size}`), {
-                httpMethod: 'PUT',
-                headers: CLIENT,
-                signal: ctrl.signal,
-                onProgress: ({ bytesSent }) => on(offset + bytesSent, size),
-              });
-              if (r.status === 409) {
-                offset = JSON.parse(r.body).received;
-                on.reset(offset);
-                continue;
-              } // laptop has less than we thought
-              if (r.status !== 200) throw new Error(r.body);
-              break;
-            } catch (e) {
-              if (!pausing || stopped.current.has(key)) throw e;
-              patch(key, { state: 'paused', rate: 0 });
-              await waitForResume(key);
-              patch(key, { state: 'active' });
-              // ask the laptop how much it kept; older fshare builds keep nothing, so that restarts at 0
-              offset = await fetch(url(`/upload?id=${key}`))
-                .then((r) => r.json())
-                .then((j) => j.received ?? 0)
-                .catch(() => 0);
+            if (r.status === 409) {
+              offset = JSON.parse(r.body).received;
               on.reset(offset);
-              patch(key, { done: offset });
-            }
+              continue;
+            } // laptop has less than we thought
+            if (r.status !== 200) throw new Error(r.body);
+            break;
+          } catch (e) {
+            if (!pausing || stopped.current.has(key)) throw e;
+            patch(key, { state: 'paused', rate: 0 });
+            await waitForResume(key);
+            patch(key, { state: 'active' });
+            // ask the laptop how much it kept; older fshare builds keep nothing, so that restarts at 0
+            offset = await fetch(url(`/upload?id=${key}`))
+              .then((r) => r.json())
+              .then((j) => j.received ?? 0)
+              .catch(() => 0);
+            on.reset(offset);
+            patch(key, { done: offset });
           }
-          patch(key, { state: 'done', done: f.size });
-        },
-        () => {
-          fetch(url(`/upload?id=${key}`), { method: 'DELETE' }).catch(() => {});
-        },
-      ); // failed: laptop drops the partial
+        }
+        patch(key, { state: 'done', done: f.size });
+      }); // a failure leaves the partial on the other side, for a retry
       try {
         tmpDir.delete();
       } catch {}
@@ -532,18 +557,22 @@ export function Session({
   const onPeer = useRef({
     progress: (_e: { id: string; name: string; from: string; done: number; total: number }) => {},
     received: (_e: { id: string; name: string; uri: string; size: number }) => {},
-    stopped: (_e: { id: string; reason: 'paused' | 'cancelled' }) => {},
+    stopped: (_e: { id: string; reason: 'paused' | 'cancelled' | 'expired' }) => {},
   });
   onPeer.current = {
     progress: ({ id, name, from, done, total }) => {
       let key = incoming.current.get(id);
       if (!key || !jobsRef.current.some((j) => j.key === key && LIVE.includes(j.state))) {
+        const old = key; // a finished or failed earlier try of this upload: this one replaces it
         key = `in-${id}-${Date.now()}`;
         incoming.current.set(id, key);
         lastDone.current.set(id, done);
         const k = key;
         controls.current.set(k, { cancel: () => Peer?.cancel(id) });
-        setJobs((js) => [{ key: k, name, dir: 'down', done, total, state: 'active', peer: from, incoming: true }, ...js]);
+        setJobs((js) => [
+          { key: k, name, dir: 'down', done, total, state: 'active', peer: from, incoming: true },
+          ...js.filter((j) => j.key !== old),
+        ]);
         return;
       }
       const prev = lastDone.current.get(id) ?? done;
@@ -553,8 +582,10 @@ export function Session({
     },
     stopped: ({ id, reason }) => {
       const key = incoming.current.get(id);
-      if (key) patch(key, { state: reason === 'paused' ? 'paused' : 'cancelled', rate: 0 });
-      if (key && reason === 'cancelled') {
+      if (!key) return;
+      // paused: the sender can still resume it; expired: kept 5 minutes and never resumed
+      patch(key, { state: reason === 'paused' ? 'paused' : reason === 'expired' ? 'error' : 'cancelled', rate: 0 });
+      if (reason !== 'paused') {
         controls.current.delete(key);
         finished([key]);
       }
@@ -607,6 +638,34 @@ export function Session({
   const verb = dirs.size > 1 ? 'Transferring' : dirs.has('up') ? 'Sending' : 'Receiving';
   const panelTitle = allPaused ? 'Paused' : moving ? `${verb} ${live.length} ${live.length === 1 ? 'file' : 'files'}` : 'Preparing…';
 
+  // Minimized, fshare keeps running while connected (Android: a foreground service with an ongoing
+  // notification; iOS: a background task while files move). After 5 idle minutes in the
+  // background it lets go; opened again, it picks back up.
+  const [idle, setIdle] = useState(false);
+  const [keepAlive, setKeepAlive] = useState(() => readPrefs().keepAlive !== false);
+  useEffect(() => {
+    askToNotify();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const sub = AppState.addEventListener('change', (state) => {
+      clearTimeout(timer);
+      if (state === 'active') setIdle(false);
+      else if (state === 'background') timer = setTimeout(() => setIdle(true), 5 * 60_000);
+    });
+    return () => {
+      clearTimeout(timer);
+      sub.remove();
+      Peer?.background(false, '', '', -1);
+    };
+  }, []);
+  const pct = liveTotal ? Math.floor((liveDone / liveTotal) * 100) : 0;
+  const keepTitle = live.length ? panelTitle : `Connected to ${laptop}`;
+  const keepText = live.length ? `${pct}% · ${fmt(liveTotal)}` : 'Ready to send and receive';
+  useEffect(() => {
+    if (!Peer) return;
+    if (!keepAlive || (idle && !live.length)) Peer.background(false, '', '', -1);
+    else Peer.background(true, keepTitle, keepText, live.length ? pct : -1);
+  }, [keepAlive, idle, live.length > 0, keepTitle, keepText, pct]);
+
   const wifi = () => {
     if (!live.length) return onWifi();
     haptic.reject();
@@ -628,37 +687,24 @@ export function Session({
   };
 
   // every device we can reach right now, plus phones nearby we could pair with
-  const others = devices.filter((d) => d.id !== device.id);
+  // the Devices screen: full screen, over this one
+  const [devicesOpen, setDevicesOpen] = useState(false);
   const picker = () => {
     haptic.tap();
-    const close = (fn: () => void) => {
-      setSheet(null);
-      setTimeout(fn, 260);
-    }; // after the sheet slides away
-    setSheet({
-      title: 'Devices',
-      extra: (
-        <DeviceList
-          current={{ ...device, name: laptop }}
-          others={others}
-          nearby={nearby}
-          away={away}
-          saved={saved}
-          onPick={(d) => close(() => onPick(d))}
-          onPair={(f) => close(() => onPair(f))}
-          onForget={(p) => close(() => onForget(p))}
-        />
-      ),
-      footer: !!Peer && <VisibilityRow visible={visible} onChange={onVisible} bg={t.surface2} />,
-      actions: [],
-    });
+    setDevicesOpen(true);
   };
+  useEffect(() => setDevicesOpen(false), [device.id]); // switched or paired: back to the transfers
 
   const menu = () =>
     setSheet({
       title: 'Settings',
-      subtitle: <ConnectionLine laptop={laptop} usb={usb} kind={device.kind} />,
-      extra: <ThemeToggle />,
+      subtitle: link === 'none' ? undefined : <ConnectionLine laptop={laptop} usb={usb} kind={device.kind} />,
+      extra: (
+        <View style={{ gap: 22 }}>
+          <ThemeToggle />
+          <Preferences onKeepAlive={setKeepAlive} />
+        </View>
+      ),
       actions: [
         ...(Platform.OS === 'android'
           ? [
@@ -670,12 +716,6 @@ export function Session({
               },
             ]
           : []),
-        {
-          label: device.kind === 'laptop' && !usb ? 'Scan again' : 'Connect over Wi-Fi',
-          detail: 'Press q in fshare, then scan',
-          icon: 'qr-code-outline',
-          onPress: wifi,
-        },
         { label: 'About', detail: 'Version and connection', icon: 'information-circle-outline', onPress: () => setAbout(true) },
       ],
     });
@@ -748,11 +788,13 @@ export function Session({
 
   // one quiet chip for the connection: grey normally, red only while reconnecting
   const chip =
-    link === 'online'
-      ? { icon: usb ? ('flash' as const) : ('wifi' as const), label: usb ? 'USB cable' : 'Wi-Fi', bg: t.surface2, fg: t.dim, spin: false }
-      : link === 'offline'
-        ? { icon: 'sync' as const, label: 'Reconnecting…', bg: t.redSoft, fg: t.red, spin: true }
-        : { icon: 'sync' as const, label: 'Connecting…', bg: t.surface2, fg: t.dim, spin: true };
+    link === 'none'
+      ? { icon: 'radio-outline' as const, label: 'No device', bg: t.surface2, fg: t.dim, spin: false }
+      : link === 'online'
+        ? { icon: usb ? ('flash' as const) : ('wifi' as const), label: usb ? 'USB cable' : 'Wi-Fi', bg: t.surface2, fg: t.dim, spin: false }
+        : link === 'offline'
+          ? { icon: 'sync' as const, label: 'Reconnecting…', bg: t.redSoft, fg: t.red, spin: true }
+          : { icon: 'sync' as const, label: 'Connecting…', bg: t.surface2, fg: t.dim, spin: true };
 
   return (
     <SafeAreaView style={st.root} edges={['top', 'left', 'right']}>
@@ -770,7 +812,11 @@ export function Session({
           >
             <Pop id={device.kind}>
               <Cookie size={58} color={t.accentSoft}>
-                <Ionicons name={device.kind === 'laptop' ? 'laptop-outline' : 'phone-portrait-outline'} size={25} color={t.onAccentSoft} />
+                <Ionicons
+                  name={link === 'none' ? 'swap-horizontal' : device.kind === 'laptop' ? 'laptop-outline' : 'phone-portrait-outline'}
+                  size={25}
+                  color={t.onAccentSoft}
+                />
               </Cookie>
             </Pop>
             <View style={{ flex: 1, gap: 5 }}>
@@ -807,16 +853,10 @@ export function Session({
               )}
             </View>
           </Press>
-          {/* one capsule: devices, then settings */}
-          <View style={st.actions}>
-            <Press style={st.action} onPress={picker} hitSlop={4} accessibilityRole="button" accessibilityLabel="Switch device">
-              <MaterialCommunityIcons name="devices" size={19} color={t.text} />
-            </Press>
-            <View style={st.actionSep} />
-            <Press style={st.action} onPress={menu} hitSlop={4} accessibilityRole="button" accessibilityLabel="Settings">
-              <Ionicons name="settings-outline" size={18} color={t.text} />
-            </Press>
-          </View>
+          {/* the header is just status; devices live behind the round button by Send */}
+          <Press style={[st.actions, st.action]} onPress={menu} hitSlop={4} accessibilityRole="button" accessibilityLabel="Settings">
+            <Ionicons name="ellipsis-horizontal" size={20} color={t.text} />
+          </Press>
         </View>
 
         {live.length > 0 && (
@@ -899,9 +939,7 @@ export function Session({
             </Cookie>
             <Text style={st.emptyTitle}>Nothing here yet</Text>
             <Text style={[st.meta, { textAlign: 'center', lineHeight: 19 }]}>
-              {device.kind === 'laptop'
-                ? 'Drop files into fshare on your laptop and they download here by themselves. Tap Send files to go the other way.'
-                : `Send files to ${laptop}. Anything they send you shows up here.`}
+              {link === 'none' ? 'Connect a device to start sharing.' : `Files from ${laptop} land here.`}
             </Text>
           </Animated.View>
         )}
@@ -995,8 +1033,9 @@ export function Session({
             </Press>
           </Animated.View>
         ) : (
-          <Animated.View key="send" entering={ENTER}>
+          <Animated.View key="send" entering={ENTER} style={st.dockRow}>
             <Press
+              grow
               style={st.send}
               disabled={!online}
               onPress={() => {
@@ -1009,10 +1048,40 @@ export function Session({
               <Ionicons name="arrow-up" size={20} color={t.onAccent} />
               <Text style={st.sendText}>Send files</Text>
             </Press>
+            <Press
+              style={[st.devicesBtn, link === 'none' && { backgroundColor: t.accentSoft, borderColor: 'transparent' }]}
+              onPress={picker}
+              accessibilityRole="button"
+              accessibilityLabel={link === 'none' ? 'Connect a device' : 'Devices'}
+            >
+              <MaterialCommunityIcons name="devices" size={22} color={link === 'none' ? t.onAccentSoft : t.text} />
+            </Press>
           </Animated.View>
         )}
       </View>
       <Sheet content={sheet} onClose={() => setSheet(null)} />
+      <DevicesScreen
+        open={devicesOpen}
+        current={{ ...device, name: laptop }}
+        devices={devices}
+        nearby={nearby}
+        saved={saved}
+        phones={!!Peer}
+        visible={visible}
+        onVisible={onVisible}
+        onPick={(d) => {
+          setDevicesOpen(false);
+          onPick(d);
+        }}
+        onPair={onPair}
+        onForget={onForget}
+        onCable={onCable}
+        onWifi={() => {
+          setDevicesOpen(false);
+          wifi();
+        }}
+        onBack={() => setDevicesOpen(false)}
+      />
       <About
         open={about}
         onClose={() => setAbout(false)}
@@ -1076,185 +1145,78 @@ function Check({ state }: { state: 'all' | 'some' | 'none' }) {
   );
 }
 
-// "Devices" sheet: where you are now, what else is connected, and phones you could pair with
-export function DeviceList({
-  current,
-  others,
-  nearby,
-  away,
-  saved,
-  onPick,
-  onPair,
-  onForget,
-}: {
-  current: Device;
-  others: Device[];
-  nearby: Found[];
-  away: SavedPeer[];
-  saved: SavedPeer[];
-  onPick: (d: Device) => void;
-  onPair: (f: Found) => void;
-  onForget: (p: SavedPeer) => void;
-}) {
+// Used in the Devices sheet and on the Connect screen, so both work the same.
+export function ConnectOptions({ onCable, onWifi, bg }: { onCable?: () => void; onWifi?: () => void; bg?: string }) {
   const [st, t] = useStyles(styles);
-  const icon = (kind: Device['kind']) => (kind === 'laptop' ? ('laptop-outline' as const) : ('phone-portrait-outline' as const));
-  const via = (d: Device) => `${d.kind === 'laptop' ? 'Laptop' : 'Phone'} · ${d.via === 'usb' ? 'USB cable' : 'Wi-Fi'}`;
-  const row = (
-    key: string,
-    name: string,
-    detail: string,
-    ic: keyof typeof Ionicons.glyphMap,
-    active: boolean,
-    onPress?: () => void,
-    action?: string,
-    onLongPress?: () => void,
-  ) => (
-    <Press
-      key={key}
-      style={st.devRow}
-      highlight={onPress ? t.surface3 : undefined}
-      onPress={onPress}
-      onLongPress={onLongPress}
-      delayLongPress={350}
-      accessibilityRole={onPress ? 'button' : undefined}
-      accessibilityLabel={`${name}, ${detail}${active ? ', connected' : ''}`}
-      accessibilityHint={onLongPress ? 'Long press to forget this phone' : undefined}
-    >
-      <View style={[st.devIcon, { backgroundColor: active ? t.accentSoft : t.surface3 }]}>
-        <Ionicons name={ic} size={19} color={active ? t.onAccentSoft : t.text} />
-      </View>
-      <View style={{ flex: 1, gap: 2 }}>
-        <Text style={st.name} numberOfLines={1}>
-          {name}
-        </Text>
-        <Text style={st.meta} numberOfLines={1}>
-          {detail}
-        </Text>
-      </View>
-      {active ? (
-        <View style={st.devNow}>
-          <Ionicons name="checkmark" size={14} color={t.onAccent} />
-        </View>
-      ) : action ? (
-        <View style={st.devAction}>
-          <Text style={st.devActionText}>{action}</Text>
-        </View>
-      ) : (
-        <Ionicons name="chevron-forward" size={16} color={t.faint} />
-      )}
-    </Press>
-  );
-  // long-press a paired phone to forget it
-  const pairedTo = (d: Device) => saved.find((p) => `phone-${p.id}` === d.id);
-  const forgets = (d: Device) => {
-    const p = pairedTo(d);
-    return p && (() => onForget(p));
-  };
+  const rows = [
+    ...(onCable && Platform.OS === 'android'
+      ? [{ icon: 'flash-outline' as const, title: 'USB cable', detail: 'Plug in your laptop or another phone', onPress: onCable }]
+      : []),
+    ...(onWifi
+      ? [{ icon: 'qr-code-outline' as const, title: 'Scan QR code', detail: 'Connect your laptop over Wi-Fi', onPress: onWifi }]
+      : []),
+  ];
   return (
-    <View style={{ gap: 18 }}>
-      <View style={st.devGroup}>
-        {row(current.id, current.name, via(current), icon(current.kind), true, undefined, undefined, forgets(current))}
-        {others.map((d) => (
-          <View key={d.id}>
-            <View style={st.devSep} />
-            {row(d.id, d.name, via(d), icon(d.kind), false, () => onPick(d), 'Switch', forgets(d))}
-          </View>
-        ))}
-      </View>
-      {away.length > 0 && (
-        <View style={{ gap: 8 }}>
-          <Text style={st.devLabel}>Your phones</Text>
-          <SavedList peers={away} onForget={onForget} bg={t.surface2} />
-        </View>
-      )}
-      {nearby.length > 0 && (
-        <View style={{ gap: 8 }}>
-          <Text style={st.devLabel}>Nearby phones</Text>
-          <View style={st.devGroup}>
-            {nearby.map((f, i) => (
-              <View key={f.name}>
-                {i > 0 && <View style={st.devSep} />}
-                {row(f.name, f.name, 'On this Wi-Fi', 'phone-portrait-outline', false, () => onPair(f), 'Connect')}
-              </View>
-            ))}
-          </View>
-        </View>
-      )}
-      {!others.length && !nearby.length && !away.length && (
-        <Text style={[st.meta, { paddingHorizontal: 4, lineHeight: 19 }]}>
-          To add a device, plug in a USB cable, or open fshare on another phone on the same Wi-Fi.
-        </Text>
-      )}
-    </View>
-  );
-}
-
-// Phones paired before that aren't reachable right now. They reconnect by themselves when back.
-export function SavedList({ peers, onForget, bg }: { peers: SavedPeer[]; onForget: (p: SavedPeer) => void; bg?: string }) {
-  const [st, t] = useStyles(styles);
-  return (
-    <View style={[st.devGroup, bg ? { backgroundColor: bg } : { backgroundColor: t.surface }]}>
-      {peers.map((p, i) => (
-        <View key={p.id}>
+    <View style={[st.devGroup, { backgroundColor: bg ?? t.surface }]}>
+      {rows.map((r, i) => (
+        <View key={r.title}>
           {i > 0 && <View style={st.devSep} />}
-          <View style={[st.devRow, { backgroundColor: 'transparent' }]} accessible accessibilityLabel={`${p.name}, not nearby`}>
+          <Press
+            style={[st.devRow, { backgroundColor: bg ?? t.surface }]}
+            highlight={bg ? t.surface3 : t.surface2}
+            onPress={() => {
+              haptic.tap();
+              r.onPress();
+            }}
+            accessibilityRole="button"
+            accessibilityLabel={`${r.title}, ${r.detail}`}
+          >
             <View style={[st.devIcon, { backgroundColor: bg ? t.surface3 : t.surface2 }]}>
-              <Ionicons name="phone-portrait-outline" size={19} color={t.dim} />
+              <Ionicons name={r.icon} size={19} color={t.text} />
             </View>
             <View style={{ flex: 1, gap: 2 }}>
-              <Text style={[st.name, { color: t.dim }]} numberOfLines={1}>
-                {p.name}
-              </Text>
-              <Text style={st.meta} numberOfLines={1}>
-                Not nearby
-              </Text>
+              <Text style={st.name}>{r.title}</Text>
+              <Text style={st.meta}>{r.detail}</Text>
             </View>
-            <Press
-              style={[st.devAction, { backgroundColor: bg ? t.surface3 : t.surface2 }]}
-              onPress={() => onForget(p)}
-              hitSlop={8}
-              accessibilityRole="button"
-              accessibilityLabel={`Forget ${p.name}`}
-            >
-              <Text style={st.devActionText}>Forget</Text>
-            </Press>
-          </View>
+            <Ionicons name="chevron-forward" size={16} color={t.faint} />
+          </Press>
         </View>
       ))}
     </View>
   );
 }
 
-// "Visible to nearby phones" switch. Off: other phones don't list this one and can't ask to pair;
-// phones already paired still connect.
-export function VisibilityRow({ visible, onChange, bg }: { visible: boolean; onChange: (v: boolean) => void; bg?: string }) {
+// Forgetting takes two taps, both right here: the bin turns into a red "Forget" for 3 seconds,
+// and a second tap removes the phone. No second sheet to find the button in.
+export function ForgetButton({ name, onForget, bg }: { name: string; onForget: () => void; bg?: string }) {
   const [st, t] = useStyles(styles);
-  const [on, setOn] = useState(visible); // the sheet renders this once, so it keeps its own copy
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (!armed) return;
+    const timer = setTimeout(() => setArmed(false), 3000);
+    return () => clearTimeout(timer);
+  }, [armed]);
   return (
     <Press
-      style={[st.devGroup, st.devRow, { backgroundColor: bg ?? t.surface }]}
-      highlight={bg ? t.surface3 : t.surface2}
+      style={[st.forget, armed ? { backgroundColor: t.redSoft, paddingHorizontal: 12 } : { backgroundColor: bg ?? t.surface3 }]}
       onPress={() => {
-        haptic.toggle(!on);
-        setOn(!on);
-        onChange(!on);
+        if (armed) {
+          haptic.reject();
+          onForget();
+        } else {
+          haptic.select();
+          setArmed(true);
+        }
       }}
-      accessibilityRole="switch"
-      accessibilityState={{ checked: on }}
-      accessibilityLabel="Visible to nearby phones"
+      hitSlop={8}
+      accessibilityRole="button"
+      accessibilityLabel={armed ? `Confirm: forget ${name}` : `Forget ${name}`}
     >
-      <View style={[st.devIcon, { backgroundColor: on ? t.accentSoft : bg ? t.surface3 : t.surface2 }]}>
-        <Ionicons name={on ? 'eye-outline' : 'eye-off-outline'} size={19} color={on ? t.onAccentSoft : t.dim} />
-      </View>
-      <View style={{ flex: 1, gap: 2 }}>
-        <Text style={st.name} numberOfLines={1}>
-          Visible to nearby phones
-        </Text>
-        <Text style={st.meta} numberOfLines={1}>
-          {on ? `Shown as ${myName}` : 'Paired phones only'}
-        </Text>
-      </View>
-      <Toggle on={on} />
+      {armed ? (
+        <Text style={[st.devActionText, { color: t.red }]}>Forget</Text>
+      ) : (
+        <MaterialCommunityIcons name="link-variant-off" size={16} color={t.dim} />
+      )}
     </Press>
   );
 }
@@ -1409,7 +1371,7 @@ function JobRow({
           {status}
         </Text>
       </View>
-      {selecting ? <Check state={selected ? 'all' : 'none'} /> : opens && <Ionicons name="open-outline" size={17} color={t.faint} />}
+      {selecting && <Check state={selected ? 'all' : 'none'} />}
     </Press>
   );
 }
@@ -1465,6 +1427,22 @@ const styles = (t: Theme) =>
       borderColor: t.line,
     },
     action: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center' },
+    dockRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+    devicesBtn: {
+      width: 60,
+      height: 60,
+      borderRadius: 30,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: t.surface2,
+      // same depth as Send: a faint rim, 1px light on top, 1px shade below
+      borderWidth: 1,
+      borderColor: t.line,
+      boxShadow:
+        t.scheme === 'dark'
+          ? 'inset 0 1px 0 rgba(255,255,255,0.08), inset 0 -1px 0 rgba(0,0,0,0.2), 0 1px 2px rgba(0,0,0,0.3)'
+          : 'inset 0 1px 0 rgba(255,255,255,0.9), inset 0 -1px 0 rgba(0,0,0,0.05), 0 1px 2px rgba(0,0,0,0.08)',
+    },
     actionSep: { width: StyleSheet.hairlineWidth, height: 18, backgroundColor: t.line },
     actionBar: {
       flexDirection: 'row',
@@ -1507,6 +1485,7 @@ const styles = (t: Theme) =>
     devSep: { height: StyleSheet.hairlineWidth, backgroundColor: t.line, marginLeft: 66 },
     devIcon: { width: 40, height: 40, borderRadius: 13, borderCurve: 'continuous', alignItems: 'center', justifyContent: 'center' },
     devNow: { width: 24, height: 24, borderRadius: 12, backgroundColor: t.accent, alignItems: 'center', justifyContent: 'center' },
+    forget: { height: 32, minWidth: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
     devAction: { height: 30, paddingHorizontal: 12, borderRadius: 15, backgroundColor: t.surface3, justifyContent: 'center' },
     devActionText: { color: t.text, fontSize: 13, fontWeight: '600' },
     devLabel: { color: t.dim, fontSize: 14, fontWeight: '600', paddingHorizontal: 4 },
@@ -1533,8 +1512,7 @@ const styles = (t: Theme) =>
       justifyContent: 'center',
       gap: 10,
       height: 60,
-      borderRadius: 20,
-      borderCurve: 'continuous',
+      borderRadius: 30,
       backgroundColor: t.accent, // under the gradient, in case it can't draw
       // flat, with just a hint of depth: a barely-there top-to-bottom shade, a faint rim,
       // 1px light on the top inner edge, 1px shade on the bottom, and a hairline shadow

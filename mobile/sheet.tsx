@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Modal, Pressable, StyleSheet, Text, useWindowDimensions, View, type ViewStyle } from 'react-native';
 import Animated, {
   Easing,
+  useAnimatedKeyboard,
   makeMutable,
   ReduceMotion,
   useAnimatedReaction,
@@ -35,6 +36,7 @@ export type SheetContent = {
   actions: SheetAction[];
   onCancel?: () => void;
   closeLabel?: string; // the bottom button; defaults to Done (with `extra`) or Cancel
+  hideClose?: boolean; // `extra` brings its own buttons
 };
 
 // Vaul's drawer curve and timing (github.com/emilkowalski/vaul)
@@ -125,7 +127,12 @@ export function Sheet({ content, onClose }: { content: SheetContent | null; onCl
     const v = open();
     return { opacity: v * v * (3 - 2 * v) };
   });
-  const panel = useAnimatedStyle(() => ({ transform: [{ translateY: (1 - p.get()) * sheetH.get() + drag.get() }] }));
+  // a text field in the sheet (the phone name in Settings): ride up with the keyboard
+  const keyboard = useAnimatedKeyboard();
+  const bottom = insets.bottom;
+  const panel = useAnimatedStyle(() => ({
+    transform: [{ translateY: (1 - p.get()) * sheetH.get() + drag.get() - Math.max(keyboard.height.get() - bottom, 0) }],
+  }));
 
   const onScroll = useAnimatedScrollHandler((e) => scrollY.set(e.contentOffset.y));
   // soft edges only where there's more to scroll to
@@ -188,13 +195,15 @@ export function Sheet({ content, onClose }: { content: SheetContent | null; onCl
             <View style={s.handle} />
             {shown && (
               <>
-                <View style={s.head}>
-                  <Text style={s.title} numberOfLines={1}>
-                    {shown.title}
-                  </Text>
-                  {shown.subtitle}
-                  {shown.message && <Text style={s.message}>{shown.message}</Text>}
-                </View>
+                {!!(shown.title || shown.subtitle || shown.message) && (
+                  <View style={s.head}>
+                    <Text style={s.title} numberOfLines={1}>
+                      {shown.title}
+                    </Text>
+                    {shown.subtitle}
+                    {shown.message && <Text style={s.message}>{shown.message}</Text>}
+                  </View>
+                )}
                 {shown.extra && (
                   <View>
                     <GestureDetector gesture={native}>
@@ -249,9 +258,11 @@ export function Sheet({ content, onClose }: { content: SheetContent | null; onCl
                   </View>
                 )}
                 {/* settings close with "Done", questions with "Cancel"; both quiet grey so the rows stay the focus */}
-                <Press style={s.close} onPress={cancel} accessibilityRole="button">
-                  <Text style={s.closeText}>{shown.closeLabel ?? (shown.extra ? 'Done' : 'Cancel')}</Text>
-                </Press>
+                {!shown.hideClose && (
+                  <Press style={s.close} onPress={cancel} accessibilityRole="button">
+                    <Text style={s.closeText}>{shown.closeLabel ?? (shown.extra ? 'Done' : 'Cancel')}</Text>
+                  </Press>
+                )}
               </>
             )}
           </Animated.View>

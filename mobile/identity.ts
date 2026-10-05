@@ -11,7 +11,13 @@ function load() {
     myId = Crypto.randomUUID();
     writePrefs({ myToken, myId });
   }
-  return { token: myToken, id: myId, name: myName };
+  return { token: myToken, id: myId, name: readPrefs().name || myName };
 }
 
 export const me = load();
+
+// laptops see it on the next request; nearby phones once fshare restarts its announcement
+export function rename(name: string) {
+  me.name = name;
+  writePrefs({ name });
+}

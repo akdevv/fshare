@@ -726,7 +726,7 @@ const styles = (t: Theme) =>
     },
     whereDir: { color: t.dim, fontSize: 14.5, lineHeight: 19, fontFamily: font.semibold, ...centered },
     wherePath: { color: t.text, fontSize: 14.5, lineHeight: 19, fontFamily: font.bold, ...centered },
-    setupFoot: { flexDirection: 'row', paddingHorizontal: 16, paddingTop: 12, paddingBottom: 8, gap: 10 },
+    setupFoot: { flexDirection: 'row', paddingHorizontal: 16, paddingTop: 40, paddingBottom: 12, gap: 10 }, // clear air between the words and the buttons
     primary: {
       flexDirection: 'row',
       gap: 10,

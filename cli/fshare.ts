@@ -21,6 +21,23 @@ const CHUNK = 1 << 20; // 1 MB stream buffers: fewer syscalls, higher throughput
 const PART = ".fshare-part"; // in-progress uploads; renamed on success, deleted on cancel
 // Resumable uploads (phone sends ?id=): parts live here, not in Downloads, until complete.
 export const PARTS = path.join(os.tmpdir(), "fshare-parts");
+export const KEEP_MS = 5 * 60_000; // a stopped upload waits this long for the phone to resume it
+
+// Drop parts nobody resumed in time. `busy`: parts being written right now.
+export function sweepParts(dir: string, busy: Set<string>, keep = KEEP_MS, now = Date.now()) {
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return; // no parts yet
+  }
+  for (const n of names) {
+    const f = path.join(dir, n);
+    try {
+      if (!busy.has(f) && now - fs.statSync(f).mtimeMs > keep) fs.rmSync(f, { force: true });
+    } catch {}
+  }
+}
 const VERSION = "2";
 const PKG_VERSION = (() => {
   for (const p of ["./package.json", "../package.json"])
@@ -259,6 +276,7 @@ export function createServer(opts: { token: string; outDir: string; shared: Shar
   const name = encodeURIComponent(opts.name ?? computerName());
   const ui = opts.ui ?? new UI();
   const taken = new Set<string>();
+  const writing = new Set<string>(); // parts mid-upload, never swept
 
   const track = (stream: NodeJS.ReadableStream, name: string, total: number, dir: Active["dir"], cancel: () => void, start = 0) => {
     const a: Active = { name, dir, done: start, total, rate: 0, last: start, cancel };
@@ -270,7 +288,7 @@ export function createServer(opts: { token: string; outDir: string; shared: Shar
   };
   const took = (t0: number, size: number) => c.dim(`${fmt(size)} · ${mbs(size / ((Date.now() - t0) / 1000 || 1))}`);
 
-  return http.createServer(async (req, res) => {
+  const server = http.createServer(async (req, res) => {
     const url = new URL(req.url!, "http://x");
     // USB pairing: only loopback can reach this, i.e. the phone through the adb cable tunnel
     // (or a process on this laptop). Wi-Fi clients must have scanned the QR instead.
@@ -381,6 +399,7 @@ export function createServer(opts: { token: string; outDir: string; shared: Shar
         return;
       }
       fs.mkdirSync(partsDir, { recursive: true });
+      writing.add(part);
       if (offset) fs.truncateSync(part, offset);
       else fs.rmSync(part, { force: true });
       let cancelled = false;
@@ -415,7 +434,9 @@ export function createServer(opts: { token: string; outDir: string; shared: Shar
         if (cancelled) {
           fs.rmSync(part, { force: true });
           ui.log(`  ${c.red("✗")} Cancelled ${name}`);
-        } else ui.log(`  ${c.yellow("‖")} Paused    ${name}  ${c.dim(`${fmt(sizeOf(part))} of ${fmt(size)} kept`)}`);
+        } else ui.log(`  ${c.yellow("‖")} Paused    ${name}  ${c.dim(`${fmt(sizeOf(part))} of ${fmt(size)} kept for 5 min`)}`);
+      } finally {
+        writing.delete(part);
       }
       return;
     }
@@ -449,6 +470,9 @@ export function createServer(opts: { token: string; outDir: string; shared: Shar
 
     res.writeHead(404).end();
   });
+  const sweep = setInterval(() => sweepParts(partsDir, writing), 60_000).unref();
+  server.on("close", () => clearInterval(sweep));
+  return server;
 }
 
 function lanIp(): string {
@@ -599,21 +623,23 @@ async function watchAccessory(port: number, adbReady: Set<string>) {
       busy.add(key); // one attempt per plug-in
       if (d.vendorId === 0x05ac || d.deviceClass === 0x09 || adbReady.has(d.serialNumber ?? "")) continue;
       if (d.configuration?.interfaces.some((i: any) => NOT_PHONE.has(i.alternate.interfaceClass))) continue;
-      switchToAccessory(d).catch(() => {});
+      switchToAccessory(d).catch(() => setTimeout(() => busy.delete(key), 5000)); // e.g. still settling: try again
     }
   };
   tick();
   setInterval(tick, 1500).unref();
 }
 
-async function switchToAccessory(d: any) {
+export async function switchToAccessory(d: any) {
   await d.open();
   try {
     const r = await d.controlTransferIn(vendor(51), 2); // AOA protocol version; non-Android devices fail here
     if (r.status !== "ok" || !r.data || r.data.getUint16(0, true) < 1) return;
     const ids = ["akdevv", "fshare", "fshare phone link", "1", "https://github.com/akdevv", "fshare"];
     for (const [i, s] of ids.entries()) await d.controlTransferOut(vendor(52, i), new TextEncoder().encode(s + "\0"));
-    await d.controlTransferOut(vendor(53)); // the phone reconnects as an accessory
+    // the phone reconnects as an accessory. node-usb needs a (here empty) buffer even with no data:
+    // without one it throws and the phone never switches
+    await d.controlTransferOut(vendor(53), new Uint8Array(0));
   } finally {
     await d.close().catch(() => {});
   }
@@ -683,7 +709,7 @@ export async function tunnel(d: any, port: number) {
         }
         queued -= n;
         const buf = Buffer.concat(batch, n);
-        for (const p of usbParts(buf, outEp.packetSize)) await d.transferOut(outEp.endpointNumber, p);
+        for (const p of usbParts(buf, outEp.packetSize)) await d.transferOut(outEp.endpointNumber, p, 10_000);
         if (queued < 1 << 20)
           for (const s of paused) {
             s.resume();
@@ -704,10 +730,9 @@ export async function tunnel(d: any, port: number) {
   };
   const stop = () => {
     if (!alive) return;
-    alive = false;
+    alive = false; // the read loop notices, waits for its reads to end, then closes the device
     for (const s of conns.values()) s.destroy();
     conns.clear();
-    d.close().catch(() => {});
   };
 
   const open = (id: number) => {
@@ -738,17 +763,42 @@ export async function tunnel(d: any, port: number) {
       s?.destroy();
     }
   });
-  const reads = Array.from({ length: 4 }, () => d.transferIn(inEp.endpointNumber, FRAME));
+  // node-usb has no "wait forever" (a timeout of 0 cancels at once), so reads wait IDLE ms and,
+  // if the phone said nothing, end as "Cancelled": that's just quiet, so read again. Every read
+  // gets a handler at once: when the link drops they all fail, and an unwatched one would crash.
+  // Failing much faster than IDLE, over and over, means the phone is gone.
+  const IDLE = 10_000;
+  const read = () => {
+    const p = d.transferIn(inEp.endpointNumber, FRAME, IDLE);
+    p.catch(() => {});
+    return { p, at: Date.now() };
+  };
+  const reads = Array.from({ length: 4 }, read);
+  let fast = 0;
   try {
     while (alive) {
-      const r = await reads.shift();
-      reads.push(d.transferIn(inEp.endpointNumber, FRAME));
-      if (r.status !== "ok") throw new Error(r.status);
+      const { p, at } = reads.shift()!;
+      let r: any;
+      try {
+        r = await p;
+      } catch (e: any) {
+        if (!/cancel/i.test(e?.message ?? "")) throw e;
+        fast = Date.now() - at < IDLE / 2 ? fast + 1 : 0;
+        if (fast > 8) throw e;
+        reads.push(read());
+        continue;
+      }
+      fast = 0;
+      if (r.status !== "ok") throw new Error(r.status); // before queueing another read: one left out would hold up the close
+      reads.push(read());
       if (r.data?.byteLength) onData(Buffer.from(r.data.buffer, r.data.byteOffset, r.data.byteLength));
     }
   } finally {
     stop();
-    reads.forEach((p) => p.catch(() => {}));
+    // the device can't close with a read still out; but never wait forever, or the watcher would
+    // think this tunnel still runs and never start the next one
+    await Promise.race([Promise.allSettled(reads.map((x) => x.p)), new Promise((r) => setTimeout(r, IDLE + 2000))]);
+    await Promise.race([d.close().catch(() => {}), new Promise((r) => setTimeout(r, 2000))]);
   }
 }
 

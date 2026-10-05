@@ -1,8 +1,11 @@
 package expo.modules.fsharepeer
 
 import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
 import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbDeviceConnection
@@ -47,18 +50,37 @@ class UsbTunnel(private val context: Context, private val listenPort: Int, priva
   private var side = 0 // low bit of connection ids we open: 0 on the host, 1 on the accessory
   private val writeLock = Any()
 
+  // Unplugged: let go of the link at once. A read on the accessory can block on after the cable
+  // is gone, and while we hold /dev/usb_accessory, Android can't start the next accessory session
+  // ("could not open /dev/usb_accessory"): every later plug-in silently fails until the app dies.
+  private val detached = object : BroadcastReceiver() {
+    override fun onReceive(c: Context, i: Intent) { teardown() }
+  }
+
   fun start() {
     if (running) return
     running = true
+    val filter = IntentFilter().apply {
+      addAction(UsbManager.ACTION_USB_ACCESSORY_DETACHED)
+      addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
+    }
+    if (Build.VERSION.SDK_INT >= 33) context.registerReceiver(detached, filter, Context.RECEIVER_EXPORTED)
+    else context.registerReceiver(detached, filter)
     thread(isDaemon = true, name = "fshare-usb") {
       while (running) {
         if (link == null) try { connect() } catch (_: Exception) {}
+        // the broadcast can be missed (e.g. while the app was frozen): check by hand too
+        else if (side == 1 && usb.accessoryList?.any { it.manufacturer == "akdevv" && it.model == "fshare" } != true) teardown()
         Thread.sleep(1000)
       }
     }
   }
 
-  fun stop() { running = false; teardown() }
+  fun stop() {
+    running = false
+    try { context.unregisterReceiver(detached) } catch (_: Exception) {}
+    teardown()
+  }
 
   private fun permission(onGranted: () -> Unit, has: Boolean, key: String, request: (PendingIntent) -> Unit) {
     if (has) return onGranted()
@@ -68,6 +90,7 @@ class UsbTunnel(private val context: Context, private val listenPort: Int, priva
   }
 
   private fun connect() {
+    if (usb.accessoryList.isNullOrEmpty()) asked.remove("acc") // a new accessory session may ask again
     // we are the accessory: the other phone already switched us
     usb.accessoryList?.firstOrNull { it.manufacturer == "akdevv" && it.model == "fshare" }?.let { acc ->
       permission({ openAccessory(usb.openAccessory(acc)) }, usb.hasPermission(acc), "acc") { usb.requestPermission(acc, it) }
@@ -152,14 +175,17 @@ class UsbTunnel(private val context: Context, private val listenPort: Int, priva
     val output = FileOutputStream(pfd.fileDescriptor)
     side = 1
     begin(object : Link {
-      override fun read(buf: ByteArray) = input.read(buf, 0, FRAME) // must ask for a full 16 KB
+      // must ask for a full 16 KB. Nothing read means the cable is gone: don't spin on it holding the fd
+      override fun read(buf: ByteArray) = input.read(buf, 0, FRAME).let { if (it <= 0) -1 else it }
       override fun write(buf: ByteArray, len: Int) = output.write(buf, 0, len)
       override fun close() { pfd.close() }
     })
   }
 
+  // 127.0.0.1, not getLoopbackAddress(): that's ::1 on some phones (a Galaxy S23 on Android 16),
+  // and the app connects to 127.0.0.1, so the cable link was up but never found
   private fun begin(l: Link) {
-    val ss = try { ServerSocket().apply { reuseAddress = true; bind(InetSocketAddress(InetAddress.getLoopbackAddress(), listenPort)) } }
+    val ss = try { ServerSocket().apply { reuseAddress = true; bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), listenPort)) } }
       catch (e: IOException) { l.close(); throw e }
     listener = ss
     link = l
@@ -247,6 +273,7 @@ class UsbTunnel(private val context: Context, private val listenPort: Int, priva
     }
   }
 
+  @Synchronized // the unplug broadcast and the read thread can both get here
   private fun teardown() {
     val l = link ?: return
     link = null

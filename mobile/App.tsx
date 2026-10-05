@@ -6,16 +6,17 @@ import { File, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { readPrefs, writePrefs, type SavedPeer } from './prefs';
-import { Session, SavedList, VisibilityRow, type Device } from './session';
+import { NO_DEVICE, Session, type Device } from './session';
 import { Behind, Sheet, type SheetContent } from './sheet';
 import { Onboarding } from './onboarding';
 import { Splash } from './splash';
 import { CABLE, Peer, SERVER_PORT, type Found } from './modules/fshare-peer';
+import { ConnectScreen } from './connect';
 import { me } from './identity';
 import { Ionicons } from '@expo/vector-icons';
 import { haptic, ThemeProvider, useStyles, useTheme, type Theme } from './theme';
 import Animated, { Easing, FadeInDown, ReduceMotion, useReducedMotion } from 'react-native-reanimated';
-import { Cookie, EASE_OUT, Press } from './ui';
+import { Cookie, Press } from './ui';
 import {
   useFonts,
   PlusJakartaSans_500Medium,
@@ -23,6 +24,7 @@ import {
   PlusJakartaSans_700Bold,
   PlusJakartaSans_800ExtraBold,
 } from '@expo-google-fonts/plus-jakarta-sans';
+import { JetBrainsMono_500Medium } from '@expo-google-fonts/jetbrains-mono';
 
 // `fshare` on the laptop tunnels this port over the USB cable (adb reverse) when the phone is plugged in
 const USB = 'http://127.0.0.1:4747';
@@ -78,6 +80,7 @@ export default function App() {
     PlusJakartaSans_600SemiBold,
     PlusJakartaSans_700Bold,
     PlusJakartaSans_800ExtraBold,
+    JetBrainsMono_500Medium,
   });
   if (!fonts) return null;
   return (
@@ -96,6 +99,7 @@ function Root() {
   const t = useTheme();
   const [devices, setDevices] = useState<Device[]>([]); // reachable right now
   const [current, setCurrent] = useState<Device | null>(null);
+  const [skipped, setSkipped] = useState(false); // went on to the main screen with nothing connected
   const [nearby, setNearby] = useState<Found[]>([]); // phones on this Wi-Fi we haven't paired with
   const [qr, setQr] = useState(false); // showing the Wi-Fi QR scanner
   const [sheet, setSheet] = useState<SheetContent | null>(null);
@@ -124,14 +128,6 @@ function Root() {
     setDevices((ds) => ds.filter((d) => d.id !== `phone-${p.id}`));
     if (cur.current?.id === `phone-${p.id}`) setCurrent(null);
   };
-  const askForget = (p: SavedPeer) => {
-    haptic.reject();
-    setSheet({
-      title: `Forget ${p.name}?`,
-      message: "To send files to each other again, you'll need to pair again.",
-      actions: [{ label: 'Forget', icon: 'trash-outline', destructive: true, onPress: () => forget(p) }],
-    });
-  };
   const changeVisible = (v: boolean) => {
     setVisible(v);
     writePrefs({ hidden: !v });
@@ -153,24 +149,32 @@ function Root() {
       // another phone tapped us in its list: ask before letting it in
       Peer.addListener('pairRequest', (r) => {
         haptic.select();
+        const answer = (ok: boolean) => {
+          Peer!.answerPair(r.id, ok);
+          setSheet(null);
+          if (!ok) return haptic.reject();
+          haptic.success();
+          const p = { id: r.peer || r.host, name: r.name, token: r.token, base: `http://${r.host}:${r.port}` };
+          remember(p);
+          const d = phone(p);
+          setDevices((ds) => [...ds.filter((x) => x.id !== d.id), d]);
+          choose(d);
+        };
         setSheet({
-          title: `${r.name} wants to connect`,
-          message: 'Accept to send files to each other over Wi-Fi.',
-          actions: [
-            {
-              label: 'Accept',
-              icon: 'checkmark',
-              onPress: () => {
-                Peer!.answerPair(r.id, true);
-                const p = { id: r.peer || r.host, name: r.name, token: r.token, base: `http://${r.host}:${r.port}` };
-                remember(p);
-                const d = phone(p);
-                setDevices((ds) => [...ds.filter((x) => x.id !== d.id), d]);
-                choose(d);
-              },
-            },
-            { label: 'Decline', icon: 'close', destructive: true, onPress: () => Peer!.answerPair(r.id, false) },
-          ],
+          title: '',
+          actions: [],
+          hideClose: true,
+          extra: (
+            <PairCard
+              them={r.name}
+              line="wants to connect"
+              note="You'll be able to send files to each other. Only accept phones you know."
+              actions={[
+                { label: 'Decline', onPress: () => answer(false) },
+                { label: 'Accept', primary: true, onPress: () => answer(true) },
+              ]}
+            />
+          ),
           onCancel: () => Peer!.answerPair(r.id, false),
         });
       }),
@@ -266,14 +270,40 @@ function Root() {
     };
   }, [qr]);
 
+  // How the cable works: there's no button to press, it connects when plugged in
+  const cableHelp = () =>
+    setSheet({
+      title: 'Connect with a cable',
+      extra: <CableSteps />,
+      actions: [],
+      closeLabel: 'Got it',
+    });
+
   // ask a nearby phone to connect; its owner sees "<this phone> wants to connect"
   const pair = async (f: Found) => {
     haptic.tap();
     const ctrl = new AbortController();
     setSheet({
-      title: `Waiting for ${f.name}`,
-      message: `Tap Accept on ${f.name} to connect.`,
+      title: '',
       actions: [],
+      hideClose: true,
+      extra: (
+        <PairCard
+          them={f.name}
+          line="Waiting for them to accept"
+          note={`Tap Accept on ${f.name} to connect.`}
+          waiting
+          actions={[
+            {
+              label: 'Cancel',
+              onPress: () => {
+                ctrl.abort();
+                setSheet(null);
+              },
+            },
+          ]}
+        />
+      ),
       onCancel: () => ctrl.abort(),
     });
     const timer = setTimeout(() => ctrl.abort(), 65000);
@@ -317,7 +347,6 @@ function Root() {
   const others = nearby.filter(
     (f) => !f.hidden && !saved.some((p) => p.id === f.id) && !devices.some((d) => d.base === `http://${f.host}:${f.port}`),
   );
-  const away = saved.filter((p) => !devices.some((d) => d.id === `phone-${p.id}`)); // paired, not reachable right now
   return (
     // black shows around the screen when a sheet pushes it back
     <SafeAreaProvider style={{ backgroundColor: '#000' }}>
@@ -330,14 +359,13 @@ function Root() {
               setOnboarded(true);
             }}
           />
-        ) : current ? (
+        ) : current || (skipped && !qr) ? (
           <Session
-            device={current}
+            device={current ?? NO_DEVICE}
             devices={devices}
             nearby={others}
-            away={away}
             saved={saved}
-            onForget={askForget}
+            onForget={forget}
             visible={visible}
             onVisible={changeVisible}
             outbox={outbox}
@@ -351,19 +379,29 @@ function Root() {
               setQr(true);
               setCurrent(null);
             }}
+            onCable={cableHelp}
           />
         ) : qr ? (
           <Scanner onConnect={scanned} onBack={() => setQr(false)} />
         ) : (
-          <Waiting
-            onWifi={() => setQr(true)}
+          <ConnectScreen
+            current={null}
+            devices={devices}
             nearby={others}
-            onPair={pair}
+            saved={saved}
+            phones={!!Peer}
             outbox={outbox.length}
-            away={away}
-            onForget={askForget}
             visible={visible}
             onVisible={changeVisible}
+            onPick={choose}
+            onPair={pair}
+            onForget={forget}
+            onCable={cableHelp}
+            onWifi={() => setQr(true)}
+            onSkip={() => {
+              haptic.tap();
+              setSkipped(true);
+            }}
           />
         )}
       </Behind>
@@ -373,136 +411,98 @@ function Root() {
   );
 }
 
-// Cookie-shaped ripples drifting out from the hero while it searches. Off with reduced motion.
-function Ripple({ delay }: { delay: number }) {
-  const t = useTheme();
+function CableSteps() {
+  const [st] = useStyles(styles);
+  const steps = [
+    'Use a USB-C cable that carries data (some charging cables don’t).',
+    'Plug it into this phone and the other one, with fshare open on both.',
+    'Tap Allow, then Open fshare, if the phones ask. It connects by itself.',
+  ];
   return (
-    <Animated.View
-      pointerEvents="none"
-      style={{
-        position: 'absolute',
-        opacity: 0,
-        animationName: { from: { opacity: 0.5, transform: [{ scale: 1 }] }, to: { opacity: 0, transform: [{ scale: 1.55 }] } },
-        animationDuration: '2.8s',
-        animationDelay: `${delay}s`,
-        animationIterationCount: 'infinite',
-        animationTimingFunction: EASE_OUT,
-      }}
-    >
-      <Cookie size={136} color={t.accent} outline />
-    </Animated.View>
+    <View style={{ gap: 14, paddingHorizontal: 4 }}>
+      {steps.map((text, i) => (
+        <View key={i} style={st.step}>
+          <View style={st.stepNum}>
+            <Text style={st.stepNumText}>{i + 1}</Text>
+          </View>
+          <Text style={st.stepText}>{text}</Text>
+        </View>
+      ))}
+      <Text style={[st.hintText, { lineHeight: 19, marginTop: 4 }]}>
+        Nothing happening? On OnePlus, Oppo and Realme phones, turn on OTG in Settings. A laptop over USB also works this way.
+      </Text>
+    </View>
   );
 }
 
-function Waiting({
-  onWifi,
-  nearby,
-  onPair,
-  outbox,
-  away,
-  onForget,
-  visible,
-  onVisible,
+// A connection request, either way round: this phone and the other one with a link between them,
+// who it is, one line on what accepting means, and the buttons side by side.
+function PairCard({
+  them,
+  line,
+  note,
+  waiting,
+  actions,
 }: {
-  onWifi: () => void;
-  nearby: Found[];
-  onPair: (f: Found) => void;
-  outbox: number;
-  away: SavedPeer[];
-  onForget: (p: SavedPeer) => void;
-  visible: boolean;
-  onVisible: (v: boolean) => void;
+  them: string;
+  line: string;
+  note: string;
+  waiting?: boolean;
+  actions: { label: string; primary?: boolean; onPress: () => void }[];
 }) {
   const [st, t] = useStyles(styles);
   const reduced = useReducedMotion();
-  const phones = !!Peer; // the installed Android app can also connect to other phones
   return (
-    <SafeAreaView style={st.root}>
-      <View style={st.body}>
-        <View style={st.heroWrap}>
-          {!reduced && (
-            <>
-              <Ripple delay={0} />
-              <Ripple delay={1.4} />
-            </>
-          )}
-          <Cookie size={136} color={t.accentSoft} spin={24}>
-            <Ionicons name={phones ? 'swap-horizontal' : 'laptop-outline'} size={46} color={t.onAccentSoft} />
-          </Cookie>
+    <View style={st.pair}>
+      <View style={st.pairArt}>
+        <Cookie size={64} color={t.surface3}>
+          <Ionicons name="phone-portrait-outline" size={24} color={t.dim} />
+        </Cookie>
+        <View style={st.pairLink}>
+          {[0, 1, 2].map((i) => (
+            <Animated.View
+              key={i}
+              style={[
+                st.pairDot,
+                !reduced && {
+                  animationName: { '0%': { opacity: 0.25 }, '40%': { opacity: 1 }, '80%': { opacity: 0.25 }, '100%': { opacity: 0.25 } },
+                  animationDuration: waiting ? '1.2s' : '2s',
+                  animationDelay: `${i * 0.15}s`,
+                  animationIterationCount: 'infinite',
+                },
+              ]}
+            />
+          ))}
         </View>
-        <Animated.Text entering={rise(0)} style={st.looking}>
-          {phones ? 'Looking for devices…' : 'Looking for your laptop…'}
-        </Animated.Text>
-        <Animated.Text entering={rise(70)} style={st.title}>
-          {phones ? 'Connect a device' : 'Connect to your laptop'}
-        </Animated.Text>
-        <Animated.Text entering={rise(140)} style={st.text}>
-          {!phones
-            ? 'Plug in the USB cable and run fshare on your laptop. It connects by itself.'
-            : Platform.OS === 'ios'
-              ? 'Pick a phone nearby, or scan the QR code from fshare on your laptop.'
-              : 'Plug a USB cable into your laptop (running fshare) or another phone, or pick a phone nearby.'}
-        </Animated.Text>
-        {outbox > 0 && (
-          <Animated.View entering={rise(0)} style={st.outbox}>
-            <Ionicons name="arrow-up-circle" size={18} color={t.onAccentSoft} />
-            <Text style={st.outboxText}>
-              {outbox} {outbox === 1 ? 'file' : 'files'} ready to send. Connect a device to choose where.
-            </Text>
-          </Animated.View>
-        )}
+        <Cookie size={64} color={t.accentSoft}>
+          <Ionicons name="phone-portrait-outline" size={24} color={t.onAccentSoft} />
+        </Cookie>
       </View>
-      {nearby.length > 0 && (
-        <Animated.View entering={rise(0)} style={{ gap: 10, marginBottom: 12 }}>
-          <Text style={st.nearbyTitle}>Nearby</Text>
-          <View style={st.group}>
-            {nearby.map((f, i) => (
-              <Press
-                key={f.name}
-                style={[st.row, i > 0 && st.rowSep]}
-                highlight={t.surface2}
-                onPress={() => onPair(f)}
-                accessibilityRole="button"
-                accessibilityLabel={`Connect to ${f.name}`}
-              >
-                <View style={st.rowIcon}>
-                  <Ionicons name="phone-portrait-outline" size={18} color={t.onAccentSoft} />
-                </View>
-                <Text style={st.rowText} numberOfLines={1}>
-                  {f.name}
-                </Text>
-                <Text style={st.rowAction}>Connect</Text>
-              </Press>
-            ))}
-          </View>
-        </Animated.View>
-      )}
-      {phones && away.length > 0 && (
-        <Animated.View entering={rise(0)} style={{ gap: 10, marginBottom: 12 }}>
-          <Text style={st.nearbyTitle}>Your phones</Text>
-          <SavedList peers={away} onForget={onForget} />
-        </Animated.View>
-      )}
-      {phones && (
-        <Animated.View entering={rise(210)} style={{ marginBottom: 12 }}>
-          <VisibilityRow visible={visible} onChange={onVisible} />
-        </Animated.View>
-      )}
-      <Animated.View entering={rise(210)}>
-        <Press
-          style={st.secondary}
-          onPress={() => {
-            haptic.tap();
-            onWifi();
-          }}
-          accessibilityRole="button"
-          accessibilityLabel="Connect to a laptop over Wi-Fi"
-        >
-          <Ionicons name="qr-code-outline" size={18} color={t.text} />
-          <Text style={st.secondaryText}>Connect over Wi-Fi</Text>
-        </Press>
-      </Animated.View>
-    </SafeAreaView>
+      <View style={{ alignItems: 'center', gap: 4 }}>
+        <Text style={st.pairName} numberOfLines={1}>
+          {them}
+        </Text>
+        <Text style={st.pairLine}>{line}</Text>
+      </View>
+      <Text style={st.pairNote}>{note}</Text>
+      <Text style={st.pairMe} numberOfLines={1}>
+        You appear as {me.name}
+      </Text>
+      <View style={st.pairButtons}>
+        {actions.map((a) => (
+          <Press
+            key={a.label}
+            grow
+            style={[st.pairBtn, a.primary && { backgroundColor: t.accent }]}
+            onPress={a.onPress}
+            accessibilityRole="button"
+            accessibilityLabel={a.label}
+          >
+            <Text style={[st.pairBtnText, a.primary && { color: t.onAccent }]}>{a.label}</Text>
+          </Press>
+        ))}
+      </View>
+    </View>
   );
 }
 
@@ -538,9 +538,30 @@ function Scanner({ onConnect, onBack }: { onConnect: (d: Device) => void; onBack
 
   return (
     <SafeAreaView style={st.root}>
-      <Animated.View entering={rise(0)} style={{ paddingTop: 24, gap: 6 }}>
-        <Text style={[st.title, { textAlign: 'left' }]}>Connect over Wi-Fi</Text>
-        <Text style={[st.text, { textAlign: 'left' }]}>In the fshare terminal, type q and press Enter, then scan the code.</Text>
+      <View style={st.bar}>
+        <Press
+          style={st.back}
+          onPress={() => {
+            haptic.tap();
+            onBack();
+          }}
+          hitSlop={8}
+          accessibilityRole="button"
+          accessibilityLabel="Back"
+        >
+          <Ionicons name="chevron-back" size={20} color={t.text} />
+        </Press>
+      </View>
+      <Animated.View entering={rise(0)} style={{ paddingTop: 8, gap: 14 }}>
+        <Text style={[st.title, { textAlign: 'left' }]} accessibilityRole="header">
+          Connect over Wi-Fi
+        </Text>
+        <View style={{ gap: 10 }}>
+          <Step n={1}>
+            Run <Text style={st.code}>fshare</Text> on your laptop and press <Text style={st.code}>q</Text>
+          </Step>
+          <Step n={2}>Point the camera at the code it shows</Step>
+        </View>
       </Animated.View>
 
       <Animated.View entering={rise(60)} style={st.camera}>
@@ -599,19 +620,23 @@ function Scanner({ onConnect, onBack }: { onConnect: (d: Device) => void; onBack
       </Animated.View>
 
       <View style={{ flex: 1 }} />
-      <Press
-        style={st.secondary}
-        onPress={() => {
-          haptic.tap();
-          onBack();
-        }}
-        accessibilityRole="button"
-        accessibilityLabel="Use USB cable instead"
-      >
-        <Ionicons name="flash" size={18} color={t.text} />
-        <Text style={st.secondaryText}>Use USB cable instead</Text>
-      </Press>
+      <View style={st.hint}>
+        <Ionicons name="wifi" size={14} color={t.faint} />
+        <Text style={st.hintText}>Your phone and laptop need to be on the same Wi-Fi</Text>
+      </View>
     </SafeAreaView>
+  );
+}
+
+function Step({ n, children }: { n: number; children: React.ReactNode }) {
+  const [st] = useStyles(styles);
+  return (
+    <View style={st.step}>
+      <View style={st.stepNum}>
+        <Text style={st.stepNumText}>{n}</Text>
+      </View>
+      <Text style={st.stepText}>{children}</Text>
+    </View>
   );
 }
 
@@ -669,6 +694,15 @@ const styles = (t: Theme) =>
       backgroundColor: t.surface2,
     },
     secondaryText: { color: t.text, fontSize: 16, fontWeight: '600' },
+    bar: { height: 52, flexDirection: 'row', alignItems: 'center' },
+    back: { width: 40, height: 40, borderRadius: 20, backgroundColor: t.surface2, alignItems: 'center', justifyContent: 'center' },
+    step: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+    stepNum: { width: 24, height: 24, borderRadius: 12, backgroundColor: t.accentSoft, alignItems: 'center', justifyContent: 'center' },
+    stepNumText: { color: t.onAccentSoft, fontSize: 12, fontWeight: '700' },
+    stepText: { flex: 1, color: t.dim, fontSize: 15, lineHeight: 21 },
+    code: { color: t.text, fontWeight: '600' },
+    hint: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingBottom: 12 },
+    hintText: { color: t.faint, fontSize: 13 },
     camera: {
       width: '100%',
       aspectRatio: 1,
@@ -713,6 +747,53 @@ const styles = (t: Theme) =>
       backgroundColor: t.accentSoft,
     },
     outboxText: { color: t.onAccentSoft, fontSize: 13, fontWeight: '600' },
+    pair: { alignItems: 'center', gap: 14, paddingTop: 8 },
+    pairArt: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 6 },
+    pairLink: { flexDirection: 'row', gap: 6 },
+    pairDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: t.accent },
+    pairName: { color: t.text, fontSize: 22, fontWeight: '700', letterSpacing: -0.4, maxWidth: 300 },
+    pairLine: { color: t.dim, fontSize: 15 },
+    pairNote: { color: t.dim, fontSize: 14, lineHeight: 20, textAlign: 'center', paddingHorizontal: 16 },
+    pairMe: { color: t.faint, fontSize: 12.5 },
+    pairButtons: { flexDirection: 'row', gap: 10, alignSelf: 'stretch', marginTop: 8 },
+    pairBtn: {
+      height: 54,
+      borderRadius: 16,
+      borderCurve: 'continuous',
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: t.surface2,
+    },
+    pairBtnText: { color: t.text, fontSize: 16, fontWeight: '600' },
+    skipBar: { flexDirection: 'row', justifyContent: 'flex-end', paddingTop: 8 },
+    skip: {
+      height: 34,
+      paddingHorizontal: 16,
+      borderRadius: 17,
+      justifyContent: 'center',
+      backgroundColor: t.surface2,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: t.line,
+    },
+    skipText: { color: t.dim, fontSize: 14, fontWeight: '600' },
+    foundHead: { paddingTop: 28, paddingBottom: 20, gap: 16 },
+    foundTop: { flexDirection: 'row', alignItems: 'center', gap: 16 },
+    radar: { width: 52, height: 52, alignItems: 'center', justifyContent: 'center' },
+    foundTitle: { color: t.text, fontSize: 24, fontWeight: '700', letterSpacing: -0.5 },
+    foundSub: { color: t.accent, fontSize: 13, fontWeight: '600' },
+    card: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 14,
+      padding: 14,
+      borderRadius: 22,
+      borderCurve: 'continuous',
+      backgroundColor: t.surface,
+    },
+    cardName: { color: t.text, fontSize: 17, fontWeight: '700', letterSpacing: -0.2 },
+    cardMeta: { color: t.dim, fontSize: 13 },
+    connect: { height: 36, paddingHorizontal: 16, borderRadius: 18, backgroundColor: t.accent, justifyContent: 'center' },
+    connectText: { color: t.onAccent, fontSize: 14, fontWeight: '700' },
     nearbyTitle: { color: t.dim, fontSize: 14, fontWeight: '600', paddingHorizontal: 4 },
     group: { backgroundColor: t.surface, borderRadius: 20, borderCurve: 'continuous', overflow: 'hidden' },
     row: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 58, paddingHorizontal: 14, backgroundColor: t.surface },

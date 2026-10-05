@@ -28,4 +28,11 @@ jest.mock('./prefs', () => {
   };
 });
 
+jest.mock('expo-notifications', () => ({
+  AndroidImportance: { DEFAULT: 3 },
+  setNotificationChannelAsync: async () => {},
+  requestPermissionsAsync: async () => ({}),
+  scheduleNotificationAsync: async () => '',
+}));
+
 jest.mock('expo-crypto', () => ({ randomUUID: () => require('crypto').randomUUID() }));

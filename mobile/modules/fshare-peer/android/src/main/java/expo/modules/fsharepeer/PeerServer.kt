@@ -19,6 +19,8 @@ import kotlin.concurrent.thread
 
 typealias Emit = (String, Map<String, Any?>) -> Unit
 
+const val KEEP_MS = 5 * 60_000L // how long a half-received file waits for the sender to resume
+
 // The receiving half of fshare on a phone. Speaks the same HTTP as the laptop CLI, so the
 // app's existing upload code (resumable PUT /upload) works phone-to-phone unchanged:
 //   GET  /pair                    token, loopback only (i.e. through the USB cable tunnel)
@@ -47,6 +49,21 @@ class PeerServer(
       while (!ss.isClosed) {
         val s = try { ss.accept() } catch (e: IOException) { break }
         thread(isDaemon = true) { try { serve(s) } catch (_: Exception) {} finally { s.close() } }
+      }
+    }
+    thread(isDaemon = true, name = "fshare-sweep") {
+      while (!ss.isClosed) { sweep(); try { Thread.sleep(60_000) } catch (_: InterruptedException) { break } }
+    }
+  }
+
+  // A stopped upload's part waits KEEP_MS for the sender to retry and pick up where it left off
+  // (even across an app restart: parts live in the cache dir). Older ones are dropped.
+  private fun sweep() {
+    val now = System.currentTimeMillis()
+    val busy = uploads.keys.map { part(it).name }.toSet()
+    partsDir.listFiles()?.forEach { f ->
+      if (f.name !in busy && now - f.lastModified() > KEEP_MS && f.delete()) {
+        emit("stopped", mapOf("id" to f.name, "reason" to "expired"))
       }
     }
   }

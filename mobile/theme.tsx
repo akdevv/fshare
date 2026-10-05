@@ -135,4 +135,5 @@ export const font = {
   semibold: 'PlusJakartaSans_600SemiBold',
   bold: 'PlusJakartaSans_700Bold',
   heavy: 'PlusJakartaSans_800ExtraBold',
+  mono: 'JetBrainsMono_500Medium', // addresses and version numbers
 };
