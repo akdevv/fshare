@@ -14,7 +14,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { Ionicons } from '@expo/vector-icons';
 import Svg, { Circle, Path } from 'react-native-svg';
-import { haptic, useStyles, useThemePref, type Theme, type ThemePref } from './theme';
+import { haptic, useStyles, useTheme, useThemePref, type Theme, type ThemePref } from './theme';
 
 export const EASE_OUT = cubicBezier(0.23, 1, 0.32, 1);
 
@@ -275,3 +275,43 @@ const styles = (t: Theme) =>
     segText: { color: t.dim, fontSize: 14, fontWeight: '500' },
     segTextOn: { color: t.text, fontWeight: '700' },
   });
+
+// On/off switch drawn the same on iOS and Android (the native one looks out of place on Android).
+// The track tints and the knob glides across; the parent row owns the press, so this only draws.
+export function Toggle({ on }: { on: boolean }) {
+  const t = useTheme();
+  const reduced = useReducedMotion();
+  const ease = { transitionDuration: reduced ? 0 : 240, transitionTimingFunction: EASE_OUT };
+  return (
+    <Animated.View
+      style={{
+        width: 50,
+        height: 30,
+        borderRadius: 15,
+        padding: 3,
+        backgroundColor: on ? t.accent : t.surface3,
+        transitionProperty: 'backgroundColor',
+        ...ease,
+      }}
+    >
+      <Animated.View
+        style={{
+          width: 24,
+          height: 24,
+          borderRadius: 12,
+          alignItems: 'center',
+          justifyContent: 'center',
+          backgroundColor: on ? t.onAccent : t.faint,
+          boxShadow: '0 1px 3px rgba(0,0,0,0.25)',
+          transform: [{ translateX: on ? 20 : 0 }],
+          transitionProperty: ['transform', 'backgroundColor'],
+          ...ease,
+        }}
+      >
+        <Animated.View style={{ opacity: on ? 1 : 0, transitionProperty: 'opacity', ...ease }}>
+          <Ionicons name="checkmark" size={14} color={t.accent} />
+        </Animated.View>
+      </Animated.View>
+    </Animated.View>
+  );
+}

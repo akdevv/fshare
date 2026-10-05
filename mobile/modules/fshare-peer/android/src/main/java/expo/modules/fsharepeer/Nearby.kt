@@ -19,13 +19,16 @@ class Nearby(context: Context, private val emit: Emit) {
   // older Androids resolve one service at a time, so resolves queue up here
   private val resolver = Executors.newSingleThreadExecutor()
 
-  fun announce(name: String, port: Int, id: String) {
+  // hidden phones still announce (so phones they're paired with can find their new address),
+  // but with hidden=1, and the app leaves them out of everyone else's Nearby list
+  fun announce(name: String, port: Int, id: String, hidden: Boolean) {
     if (registration != null) return
     val info = NsdServiceInfo().apply {
       serviceName = name
       serviceType = type
       this.port = port
       setAttribute("id", id)
+      if (hidden) setAttribute("hidden", "1")
     }
     registration = object : NsdManager.RegistrationListener {
       override fun onServiceRegistered(info: NsdServiceInfo) {}
@@ -60,6 +63,7 @@ class Nearby(context: Context, private val emit: Emit) {
         if (host != null) emit("peerFound", mapOf(
           "name" to info.serviceName, "host" to host.hostAddress, "port" to info.port,
           "id" to (info.attributes["id"]?.let { String(it) } ?: ""),
+          "hidden" to (info.attributes["hidden"] != null),
         ))
         done.release()
       }
@@ -67,10 +71,14 @@ class Nearby(context: Context, private val emit: Emit) {
     done.tryAcquire(10, TimeUnit.SECONDS)
   }
 
-  fun stop() {
+  fun unannounce() {
     registration?.let { try { nsd.unregisterService(it) } catch (_: Exception) {} }
-    discovery?.let { try { nsd.stopServiceDiscovery(it) } catch (_: Exception) {} }
     registration = null
+  }
+
+  fun stop() {
+    unannounce()
+    discovery?.let { try { nsd.stopServiceDiscovery(it) } catch (_: Exception) {} }
     discovery = null
   }
 }

@@ -12,6 +12,7 @@ class FsharePeerModule : Module() {
   private var server: PeerServer? = null
   private var nearby: Nearby? = null
   private var tunnel: UsbTunnel? = null
+  private var me: Triple<String, String, Boolean>? = null
 
   private val context get() = appContext.reactContext ?: throw Exceptions.ReactContextLost()
 
@@ -25,12 +26,21 @@ class FsharePeerModule : Module() {
     }
 
     // idempotent: a JS reload calls it again
-    Function("start") { token: String, name: String, id: String ->
+    Function("start") { token: String, name: String, id: String, visible: Boolean ->
       if (server != null) return@Function
       val emit: Emit = { event, body -> sendEvent(event, body) }
-      server = PeerServer(SERVER_PORT, token, name, File(context.cacheDir, "fshare-in"), emit).also { it.start() }
-      nearby = Nearby(context, emit).also { it.announce(name, SERVER_PORT, id); it.discover() }
+      me = Triple(name, id, visible)
+      server = PeerServer(SERVER_PORT, token, name, File(context.cacheDir, "fshare-in"), emit).also { it.visible = visible; it.start() }
+      nearby = Nearby(context, emit).also { it.announce(name, SERVER_PORT, id, !visible); it.discover() }
       tunnel = UsbTunnel(context, CABLE_PORT, SERVER_PORT, emit).also { it.start() }
+    }
+
+    // re-announce with the new hidden flag; NSD can't change a registered service's attributes
+    Function("setVisible") { visible: Boolean ->
+      val (name, id) = me ?: return@Function
+      me = Triple(name, id, visible)
+      server?.visible = visible
+      nearby?.run { unannounce(); announce(name, SERVER_PORT, id, !visible) }
     }
 
     Function("answerPair") { id: String, ok: Boolean -> server?.answer(id, ok) }

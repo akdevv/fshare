@@ -38,6 +38,12 @@ if (lan) assert.equal((await fetch(`http://${lan}:${(server.address() as any).po
 assert.equal(decodeURIComponent((await fetch(`${base}/list?t=tok`)).headers.get("x-fshare-name")!), "Test Mac");
 assert.deepEqual(await (await fetch(`${base}/list?t=tok`)).json(), [{ id: 0, path: "dir/sub/a.bin", size: 3_000_000 }]);
 const got = Buffer.from(await (await fetch(`${base}/file/0?t=tok`)).arrayBuffer());
+// each phone gets each file once: after a full download it drops off that phone's list only
+await (await fetch(`${base}/file/0?t=tok&c=phoneA`)).arrayBuffer();
+const listFor = async (c: string) => (await fetch(`${base}/list?t=tok&c=${c}`)).json();
+for (let i = 0; i < 50 && (await listFor("phoneA")).length; i++) await new Promise((r) => setTimeout(r, 10)); // marked once the send finishes
+assert.deepEqual(await listFor("phoneA"), []);
+assert.equal((await (await fetch(`${base}/list?t=tok&c=phoneB`)).json()).length, 1);
 assert.ok(got.equals(fs.readFileSync(files[0].abs)));
 // resume from an offset
 const part = await fetch(`${base}/file/0?t=tok`, { headers: { range: "bytes=1000000-" } });

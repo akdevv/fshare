@@ -8,13 +8,13 @@ appId: host.exp.Exponent
 
 # first launch: onboarding
 - extendedWaitUntil:
-    visible: Welcome to fshare
+    visible: Send files between your phone and laptop
     timeout: 90000
-- tapOn: Continue
-- assertVisible: Plug in and go
-- assertVisible: npx fshare-cli
-- tapOn: Continue
-- assertVisible: Or go wireless
+- tapOn: Next
+- assertVisible: Plug in
+- assertVisible: npx fshare-cli, copy
+- tapOn: Next
+- assertVisible: No cable\? Use Wi-Fi
 - tapOn: Get started
 
 # connects to the CLI by itself and lists what it shares

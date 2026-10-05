@@ -2,14 +2,17 @@ import { useEffect, useRef, useState } from 'react';
 import { Platform, ScrollView, StyleSheet, Text, View, type StyleProp, type ViewStyle } from 'react-native';
 import Animated, { Easing, FadeIn, FadeOut, LinearTransition, ReduceMotion } from 'react-native-reanimated';
 import { Directory, File, Paths } from 'expo-file-system';
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { getSaveDir, label, pickSaveDir, saveInto } from './downloads';
 import { About } from './about';
 import { Sheet, type SheetContent } from './sheet';
 import { eta, fileIcon, fmt, haptic, rate, useStyles, type Theme } from './theme';
-import { Bar, Cookie, Pop, Press, Ring, ThemeToggle } from './ui';
+import { Bar, Cookie, Pop, Press, Ring, ThemeToggle, Toggle } from './ui';
 import { myName, Peer, type Found } from './modules/fshare-peer';
+import { me } from './identity';
+import { openFile } from './open';
+import type { SavedPeer } from './prefs';
 
 // something we can send to: the laptop running fshare, or another phone running this app
 export type Device = { id: string; name: string; base: string; token: string; kind: 'laptop' | 'phone'; via: 'usb' | 'wifi' };
@@ -29,10 +32,6 @@ type Job = {
   incoming?: boolean; // pushed to us by another phone: only the sender can pause it
 };
 type Link = 'connecting' | 'online' | 'offline';
-type Row =
-  | { kind: 'folder'; name: string; files: Remote[]; size: number; open: boolean }
-  | { kind: 'file'; file: Remote; nested?: boolean }
-  | { kind: 'job'; job: Job };
 
 const CLIENT = { 'x-fshare-client': encodeURIComponent(myName) }; // lets the other side show who's connected
 const PARALLEL = 3; // a few streams at once keeps the link busy with many small files
@@ -73,34 +72,22 @@ function tail(src: File, offset: number, dir: Directory): File {
   return out;
 }
 
-// Shared files, with folders collapsed into one row each (expanded on tap).
-export function group(remote: Remote[], open: Set<string>): Row[] {
-  const rows: Row[] = [];
-  const folders = new Map<string, Remote[]>();
-  for (const r of remote) {
-    const top = r.path.includes('/') ? r.path.split('/')[0] : null;
-    if (!top) {
-      rows.push({ kind: 'file', file: r });
-      continue;
-    }
-    if (!folders.has(top)) {
-      folders.set(top, []);
-      rows.push({ kind: 'folder', name: top, files: [], size: 0, open: open.has(top) });
-    }
-    folders.get(top)!.push(r);
-  }
-  return rows.flatMap((row): Row[] => {
-    if (row.kind !== 'folder') return [row];
-    const files = folders.get(row.name)!;
-    const folder = { ...row, files, size: files.reduce((a, f) => a + f.size, 0) };
-    return [folder, ...(folder.open ? files.map((file) => ({ kind: 'file' as const, file, nested: true })) : [])];
-  });
+// "a.jpg", "a.jpg and b.jpg", "a.jpg and 3 more"
+export function summary(names: string[]) {
+  if (names.length <= 1) return names[0] ?? '';
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names[0]} and ${names.length - 1} more`;
 }
 
 export function Session({
   device,
   devices,
   nearby,
+  away,
+  saved,
+  onForget,
+  visible,
+  onVisible,
   outbox,
   clearOutbox,
   onPick,
@@ -110,6 +97,11 @@ export function Session({
   device: Device;
   devices: Device[];
   nearby: Found[];
+  away: SavedPeer[];
+  saved: SavedPeer[];
+  onForget: (p: SavedPeer) => void;
+  visible: boolean;
+  onVisible: (v: boolean) => void;
   outbox: File[];
   clearOutbox: () => void;
   onPick: (d: Device) => void;
@@ -121,15 +113,12 @@ export function Session({
   const [link, setLink] = useState<Link>('connecting');
   const [laptop, setLaptop] = useState(device.name);
   const [outdated, setOutdated] = useState(false); // laptop runs an fshare without name/resume support
-  const [remote, setRemote] = useState<Remote[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [speed, setSpeed] = useState({ up: 0, down: 0 });
   const [saveDir, setSaveDir] = useState(getSaveDir);
-  const [openFolders, setOpenFolders] = useState(new Set<string>());
   const [sheet, setSheet] = useState<SheetContent | null>(null);
   const [about, setAbout] = useState(false);
-  const [selected, setSelected] = useState<Set<number> | null>(null); // ready-to-download ids picked in select mode
-  const [hidden, setHidden] = useState(new Set<number>()); // removed from the list here (older laptops can't unshare)
+  const [picked, setPicked] = useState<Set<string> | null>(null); // finished transfers chosen in select mode
   const bytes = useRef({ up: 0, down: 0 });
   const controls = useRef(new Map<string, Control>());
   const resumers = useRef(new Map<string, { go: () => void; stop: (e: Error) => void }>()); // paused jobs
@@ -137,9 +126,28 @@ export function Session({
   const jobsRef = useRef(jobs);
   jobsRef.current = jobs;
 
-  const url = (p: string) => `${server.base}${p}${p.includes('?') ? '&' : '?'}t=${server.token}`;
+  // `c` tells the laptop which phone this is, so it hands each file to each phone once
+  const urlFor = (d: Device, p: string) => `${d.base}${p}${p.includes('?') ? '&' : '?'}t=${d.token}&c=${me.id}`;
+  const url = (p: string) => urlFor(server, p);
 
-  // poll the laptop: keeps the shared list fresh and tells us if it's still reachable
+  // What the laptop shares downloads by itself: poll its list and fetch anything new.
+  const requested = useRef(new Set<string>()); // files we've already started, by laptop + id
+  const declined = useRef(false); // no save folder chosen yet; wait until there is one
+  const autoGet = useRef((_list: Remote[]) => {});
+  autoGet.current = (list) => {
+    if (declined.current && !saveDir) return;
+    const key = (r: Remote) => `${server.base}|${server.token}|${r.id}|${r.path}|${r.size}`;
+    const fresh = list.filter((r) => !requested.current.has(key(r)));
+    if (!fresh.length) return;
+    fresh.forEach((r) => requested.current.add(key(r)));
+    download(fresh).then((ok) => {
+      if (ok) return;
+      declined.current = true; // they stay on the laptop; picking a folder in Settings starts them
+      fresh.forEach((r) => requested.current.delete(key(r)));
+    });
+  };
+
+  // poll the laptop: brings in new files and tells us if it's still reachable
   useEffect(() => {
     let alive = true;
     const load = async () => {
@@ -151,7 +159,7 @@ export function Session({
         const list = await r.json();
         const name = r.headers.get('x-fshare-name');
         if (alive) {
-          setRemote(list);
+          autoGet.current(list);
           setLink('online');
           if (name) setLaptop(decodeURIComponent(name));
           setOutdated(!r.headers.get('x-fshare-version'));
@@ -162,11 +170,8 @@ export function Session({
       clearTimeout(t);
     };
     setLink('connecting');
-    setRemote([]);
     setLaptop(device.name);
     setOutdated(false);
-    setSelected(null);
-    setHidden(new Set());
     load();
     const t = setInterval(load, 2000);
     return () => {
@@ -261,7 +266,10 @@ export function Session({
 
   const changeSaveDir = async () => {
     const d = await pickSaveDir();
-    if (d) setSaveDir(d);
+    if (d) {
+      setSaveDir(d);
+      declined.current = false;
+    }
   };
   const ensureSaveDir = () =>
     new Promise<Directory | null>((resolve) => {
@@ -285,9 +293,10 @@ export function Session({
       });
     });
 
+  // false when there's nowhere to save (no folder chosen)
   const download = async (items: Remote[]) => {
     const root = await ensureSaveDir();
-    if (!root) return;
+    if (!root) return false;
     const batch = items.map((r) => ({ r, key: `d${r.id}-${Date.now()}` }));
     setJobs((js) => [
       ...batch.map(({ r, key }) => ({
@@ -301,6 +310,7 @@ export function Session({
           drop(key);
           download([r]);
         },
+        peer: laptop,
       })),
       ...js,
     ]);
@@ -361,9 +371,13 @@ export function Session({
       );
     });
     finished(batch.map((b) => b.key));
+    return true;
   };
 
-  const upload = async (files: File[]) => {
+  // `to` defaults to the device on screen; the share-sheet confirm can pick another one
+  const upload = async (files: File[], to: Device = server) => {
+    const url = (p: string) => urlFor(to, p);
+    const toName = to.id === server.id ? laptop : to.name;
     const batch = files.map((f, i) => ({ f, key: `u${Date.now()}-${i}` }));
     setJobs((js) => [
       ...batch.map(({ f, key }) => ({
@@ -373,10 +387,10 @@ export function Session({
         done: 0,
         total: f.size,
         state: 'queued' as const,
-        peer: laptop,
+        peer: toName,
         retry: () => {
           drop(key);
-          upload([f]);
+          upload([f], to);
         },
       })),
       ...js,
@@ -464,11 +478,51 @@ export function Session({
     if (!res.canceled) upload(res.result);
   };
 
-  // files shared into fshare from another app go to whichever device we're on, once it answers
+  // Files shared into fshare from another app (Gallery › Share): confirm where they go first.
   useEffect(() => {
     if (link !== 'online' || !outbox.length) return;
-    upload(outbox);
-    clearOutbox();
+    const files = outbox;
+    const names = files.map((f) => {
+      try {
+        return decodeURIComponent(f.name);
+      } catch {
+        return 'file';
+      }
+    });
+    const size = files.reduce((n, f) => {
+      try {
+        return n + (f.size ?? 0);
+      } catch {
+        return n;
+      }
+    }, 0);
+    const send = (d: Device) => () => {
+      haptic.tap();
+      clearOutbox();
+      upload(files, d);
+    };
+    haptic.select();
+    setSheet({
+      title: files.length === 1 ? 'Send this file?' : `Send ${files.length} files?`,
+      message: `${summary(names)}${size ? ` · ${fmt(size)}` : ''}`,
+      actions: [
+        {
+          label: `Send to ${laptop}`,
+          detail: `${device.kind === 'laptop' ? 'Laptop' : 'Phone'} · ${usb ? 'USB cable' : 'Wi-Fi'}`,
+          icon: 'arrow-up',
+          onPress: send(device),
+        },
+        ...devices
+          .filter((d) => d.id !== device.id)
+          .map((d) => ({
+            label: `Send to ${d.name}`,
+            detail: `${d.kind === 'laptop' ? 'Laptop' : 'Phone'} · ${d.via === 'usb' ? 'USB cable' : 'Wi-Fi'}`,
+            icon: d.kind === 'laptop' ? ('laptop-outline' as const) : ('phone-portrait-outline' as const),
+            onPress: send(d),
+          })),
+      ],
+      onCancel: clearOutbox,
+    });
   }, [link, outbox]);
 
   // Another phone pushing files to us. Its upload streams into the native server; we mirror the
@@ -575,7 +629,6 @@ export function Session({
 
   // every device we can reach right now, plus phones nearby we could pair with
   const others = devices.filter((d) => d.id !== device.id);
-  const canSwitch = others.length > 0 || nearby.length > 0 || !!Peer;
   const picker = () => {
     haptic.tap();
     const close = (fn: () => void) => {
@@ -589,10 +642,14 @@ export function Session({
           current={{ ...device, name: laptop }}
           others={others}
           nearby={nearby}
+          away={away}
+          saved={saved}
           onPick={(d) => close(() => onPick(d))}
           onPair={(f) => close(() => onPair(f))}
+          onForget={(p) => close(() => onForget(p))}
         />
       ),
+      footer: !!Peer && <VisibilityRow visible={visible} onChange={onVisible} bg={t.surface2} />,
       actions: [],
     });
   };
@@ -607,70 +664,88 @@ export function Session({
           ? [
               {
                 label: 'Save folder',
-                detail: saveDir ? label(saveDir) : 'Not chosen yet',
+                detail: saveDir ? label(saveDir) : 'Not set',
                 icon: 'folder-outline' as const,
                 onPress: changeSaveDir,
               },
             ]
           : []),
         {
-          label: device.kind === 'laptop' && !usb ? 'Scan a new QR code' : 'Laptop over Wi-Fi',
-          detail: 'Scan the code from fshare on your laptop (press q)',
+          label: device.kind === 'laptop' && !usb ? 'Scan again' : 'Connect over Wi-Fi',
+          detail: 'Press q in fshare, then scan',
           icon: 'qr-code-outline',
           onPress: wifi,
         },
-        { label: 'About', detail: 'Version and connection details', icon: 'information-circle-outline', onPress: () => setAbout(true) },
+        { label: 'About', detail: 'Version and connection', icon: 'information-circle-outline', onPress: () => setAbout(true) },
       ],
     });
 
-  const toggleFolder = (name: string) => {
+  // select mode for finished transfers: long-press, then delete received files or clear them
+  const selecting = picked !== null;
+  const allPicked = selecting && completed.length > 0 && completed.every((j) => picked.has(j.key));
+  const startPick = (key?: string) => {
     haptic.select();
-    setOpenFolders((s) => {
-      const n = new Set(s);
-      if (n.has(name)) n.delete(name);
-      else n.add(name);
+    setPicked(new Set(key ? [key] : []));
+  };
+  const togglePick = (key: string) => {
+    haptic.select();
+    setPicked((cur) => {
+      const n = new Set(cur);
+      if (n.has(key)) n.delete(key);
+      else n.add(key);
       return n;
     });
   };
-  const get = (items: Remote[]) => {
+  const pickAll = () => {
+    haptic.select();
+    setPicked(allPicked ? new Set() : new Set(completed.map((j) => j.key)));
+  };
+  const clearPicked = () => {
+    const keys = picked ?? new Set();
+    haptic.select();
+    setJobs((js) => js.filter((j) => !keys.has(j.key)));
+    setPicked(null);
+  };
+  const deletePicked = () => {
+    const chosen = jobs.filter((j) => picked?.has(j.key));
+    const onPhone = chosen.filter((j) => j.dir === 'down' && j.file);
+    haptic.reject();
+    setSheet({
+      title: onPhone.length === 1 ? 'Delete this file?' : `Delete ${onPhone.length} files?`,
+      message: `${summary(onPhone.map((j) => j.name.split('/').pop()!))}. They're removed from this phone; files on other devices stay.`,
+      actions: [
+        {
+          label: 'Delete',
+          icon: 'trash-outline',
+          destructive: true,
+          onPress: () => {
+            for (const j of onPhone) {
+              try {
+                j.file!.delete();
+              } catch {}
+            }
+            setJobs((js) => js.filter((j) => !picked?.has(j.key)));
+            setPicked(null);
+            haptic.success();
+          },
+        },
+      ],
+    });
+  };
+  const pickedJobs = completed.filter((j) => picked?.has(j.key));
+  const canDelete = pickedJobs.some((j) => j.dir === 'down' && j.file);
+  useEffect(() => {
+    if (selecting && !completed.length) setPicked(null);
+  }, [completed.length]);
+
+  const open = async (job: Job) => {
     haptic.tap();
-    download(items);
+    if (!job.file || !(await openFile(job.file))) {
+      haptic.error();
+      setSheet({ title: "Couldn't open this file", message: 'No app on this phone can open it, or it was moved or deleted.', actions: [] });
+    }
   };
 
-  // select mode for "Ready to download": long-press a row, then remove or download a batch
-  const visible = remote.filter((r) => !hidden.has(r.id));
-  const rows = group(visible, openFolders);
-  const selecting = selected !== null;
-  const pickedFiles = visible.filter((r) => selected?.has(r.id));
-  const allSelected = selecting && visible.length > 0 && visible.every((r) => selected.has(r.id));
-  const startSelect = (files: Remote[]) => {
-    haptic.select();
-    setSelected(new Set(files.map((f) => f.id)));
-  };
-  const toggle = (files: Remote[]) => {
-    haptic.select();
-    setSelected((cur) => {
-      const n = new Set(cur);
-      const all = files.every((f) => n.has(f.id));
-      files.forEach((f) => (all ? n.delete(f.id) : n.add(f.id)));
-      return n;
-    });
-  };
-  const toggleAll = () => {
-    haptic.select();
-    setSelected(allSelected ? new Set() : new Set(visible.map((r) => r.id)));
-  };
-  const removeSelected = () => {
-    const ids = [...(selected ?? [])];
-    haptic.reject();
-    setHidden((h) => new Set([...h, ...ids]));
-    setSelected(null);
-    // the laptop drops them from its list (files on the laptop are left alone)
-    ids.forEach((id) => fetch(url(`/file/${id}`), { method: 'DELETE' }).catch(() => {}));
-  };
-  useEffect(() => {
-    if (selecting && !visible.length) setSelected(null);
-  }, [visible.length]);
   // one quiet chip for the connection: grey normally, red only while reconnecting
   const chip =
     link === 'online'
@@ -687,11 +762,11 @@ export function Session({
           <Press
             grow
             style={st.deviceTap}
-            highlight={canSwitch ? t.surface2 : undefined}
-            onPress={canSwitch ? picker : undefined}
-            accessibilityRole={canSwitch ? 'button' : undefined}
+            highlight={t.surface2}
+            onPress={picker}
+            accessibilityRole="button"
             accessibilityLabel={`${laptop}, ${online ? `connected over ${chip.label}` : chip.label}`}
-            accessibilityHint={canSwitch ? 'Switch device' : undefined}
+            accessibilityHint="Switch device"
           >
             <Pop id={device.kind}>
               <Cookie size={58} color={t.accentSoft}>
@@ -700,16 +775,9 @@ export function Session({
             </Pop>
             <View style={{ flex: 1, gap: 5 }}>
               <Pop id={laptop} fade>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                  <Text style={[st.deviceName, { flexShrink: 1 }]} numberOfLines={1}>
-                    {laptop}
-                  </Text>
-                  {canSwitch && (
-                    <View style={st.switcher}>
-                      <Ionicons name="chevron-expand" size={13} color={t.dim} />
-                    </View>
-                  )}
-                </View>
+                <Text style={st.deviceName} numberOfLines={1}>
+                  {laptop}
+                </Text>
               </Pop>
               <Pop id={chip.label} fade>
                 <Animated.View
@@ -739,9 +807,16 @@ export function Session({
               )}
             </View>
           </Press>
-          <Press style={st.more} onPress={menu} hitSlop={10} accessibilityRole="button" accessibilityLabel="Settings">
-            <Ionicons name="ellipsis-horizontal" size={18} color={t.text} />
-          </Press>
+          {/* one capsule: devices, then settings */}
+          <View style={st.actions}>
+            <Press style={st.action} onPress={picker} hitSlop={4} accessibilityRole="button" accessibilityLabel="Switch device">
+              <MaterialCommunityIcons name="devices" size={19} color={t.text} />
+            </Press>
+            <View style={st.actionSep} />
+            <Press style={st.action} onPress={menu} hitSlop={4} accessibilityRole="button" accessibilityLabel="Settings">
+              <Ionicons name="settings-outline" size={18} color={t.text} />
+            </Press>
+          </View>
         </View>
 
         {live.length > 0 && (
@@ -817,7 +892,7 @@ export function Session({
           </Animated.View>
         )}
 
-        {!remote.length && !jobs.length && (
+        {!jobs.length && (
           <Animated.View style={st.empty} entering={ENTER} exiting={EXIT}>
             <Cookie size={76} color={t.surface2}>
               <Ionicons name="swap-vertical" size={26} color={t.dim} />
@@ -825,115 +900,9 @@ export function Session({
             <Text style={st.emptyTitle}>Nothing here yet</Text>
             <Text style={[st.meta, { textAlign: 'center', lineHeight: 19 }]}>
               {device.kind === 'laptop'
-                ? 'Send from this phone, or drag files into fshare on your laptop to receive them.'
+                ? 'Drop files into fshare on your laptop and they download here by themselves. Tap Send files to go the other way.'
                 : `Send files to ${laptop}. Anything they send you shows up here.`}
             </Text>
-          </Animated.View>
-        )}
-
-        {rows.length > 0 && (
-          <Animated.View entering={ENTER} exiting={EXIT} layout={LAYOUT}>
-            <View style={st.sectionHead}>
-              <Pop id={selecting ? 'select' : 'ready'} fade>
-                <Text style={st.sectionTitle}>{selecting ? `${selected!.size} selected` : 'Ready to download'}</Text>
-              </Pop>
-              <View style={{ flexDirection: 'row', gap: 8 }}>
-                {selecting ? (
-                  <>
-                    <Press style={st.textBtn} onPress={toggleAll} hitSlop={8} accessibilityRole="button">
-                      <Text style={st.textBtnLabel}>{allSelected ? 'Deselect all' : 'Select all'}</Text>
-                    </Press>
-                    <Press
-                      style={st.textBtn}
-                      onPress={() => {
-                        haptic.select();
-                        setSelected(null);
-                      }}
-                      hitSlop={8}
-                      accessibilityRole="button"
-                    >
-                      <Text style={st.textBtnLabel}>Done</Text>
-                    </Press>
-                  </>
-                ) : (
-                  <>
-                    <Press style={st.textBtn} onPress={() => startSelect([])} hitSlop={8} accessibilityRole="button">
-                      <Text style={st.textBtnLabel}>Select</Text>
-                    </Press>
-                    <Press style={st.textBtn} onPress={() => get(visible)} disabled={!online} hitSlop={8} accessibilityRole="button">
-                      <Text style={st.textBtnLabel}>Get all</Text>
-                    </Press>
-                  </>
-                )}
-              </View>
-            </View>
-            <View style={st.group}>
-              {rows.map((item, i) => {
-                if (item.kind === 'job') return null;
-                const files = item.kind === 'folder' ? item.files : [item.file];
-                const on = files.filter((f) => selected?.has(f.id)).length;
-                const check = on === files.length ? 'all' : on ? 'some' : 'none';
-                const label = item.kind === 'folder' ? item.name : item.file.path;
-                return (
-                  <Animated.View
-                    key={item.kind === 'folder' ? `f:${item.name}` : `r${item.file.id}`}
-                    entering={ENTER}
-                    exiting={EXIT}
-                    layout={LAYOUT}
-                  >
-                    <Press
-                      style={[
-                        st.cell,
-                        item.kind === 'file' && item.nested && { paddingLeft: 28 },
-                        check !== 'none' && { backgroundColor: t.surface2 },
-                      ]}
-                      highlight={t.surface2}
-                      onPress={() => (selecting ? toggle(files) : item.kind === 'folder' ? toggleFolder(item.name) : online && get(files))}
-                      onLongPress={() => (selecting ? toggle(files) : startSelect(files))}
-                      delayLongPress={350}
-                      accessibilityRole="button"
-                      accessibilityState={selecting ? { selected: check === 'all' } : undefined}
-                      accessibilityLabel={
-                        selecting
-                          ? label
-                          : item.kind === 'folder'
-                            ? `${item.name}, ${item.files.length} files, ${item.open ? 'collapse' : 'expand'}`
-                            : `Download ${label}`
-                      }
-                      accessibilityHint={selecting ? undefined : 'Long press to select'}
-                    >
-                      {i > 0 && <View style={st.sep} />}
-                      <View style={st.thumb}>
-                        {item.kind === 'folder' ? (
-                          <Ionicons name={item.open ? 'folder-open' : 'folder'} size={20} color={t.amber} />
-                        ) : (
-                          <Ionicons name={fileIcon(item.file.path)} size={19} color={t.dim} />
-                        )}
-                      </View>
-                      <View style={st.cellText}>
-                        <Text style={st.name} numberOfLines={1}>
-                          {item.kind === 'folder' ? item.name : item.file.path.split('/').pop()}
-                        </Text>
-                        <Text style={st.meta}>
-                          {item.kind === 'folder' ? `${item.files.length} files · ${fmt(item.size)}` : fmt(item.file.size)}
-                        </Text>
-                      </View>
-                      {selecting ? (
-                        <Check state={check} />
-                      ) : (
-                        <IconButton
-                          icon="arrow-down"
-                          tone="accent"
-                          disabled={!online}
-                          onPress={() => get(files)}
-                          label={`Download ${label}`}
-                        />
-                      )}
-                    </Press>
-                  </Animated.View>
-                );
-              })}
-            </View>
           </Animated.View>
         )}
 
@@ -941,17 +910,30 @@ export function Session({
           <Animated.View entering={ENTER} exiting={EXIT} layout={LAYOUT}>
             <View style={st.sectionHead}>
               <Text style={st.sectionTitle}>Transfers</Text>
-              <Press
-                style={st.textBtn}
-                onPress={() => {
-                  haptic.select();
-                  clearFinished();
-                }}
-                hitSlop={8}
-                accessibilityRole="button"
-              >
-                <Text style={st.textBtnLabel}>Clear</Text>
-              </Press>
+              <View style={{ flexDirection: 'row', gap: 8 }}>
+                {selecting ? (
+                  <Press style={st.textBtn} onPress={pickAll} hitSlop={8} accessibilityRole="button">
+                    <Text style={st.textBtnLabel}>{allPicked ? 'Deselect all' : 'Select all'}</Text>
+                  </Press>
+                ) : (
+                  <>
+                    <Press style={st.textBtn} onPress={() => startPick()} hitSlop={8} accessibilityRole="button">
+                      <Text style={st.textBtnLabel}>Select</Text>
+                    </Press>
+                    <Press
+                      style={st.textBtn}
+                      onPress={() => {
+                        haptic.select();
+                        clearFinished();
+                      }}
+                      hitSlop={8}
+                      accessibilityRole="button"
+                    >
+                      <Text style={st.textBtnLabel}>Clear</Text>
+                    </Press>
+                  </>
+                )}
+              </View>
             </View>
             <View style={st.group}>
               {completed.map((job, i) => (
@@ -960,18 +942,10 @@ export function Session({
                     job={job}
                     style={st.cell}
                     first={i === 0}
-                    onCancel={() => {
-                      haptic.reject();
-                      cancel(job.key);
-                    }}
-                    onPause={() => {
-                      haptic.toggle(false);
-                      pause(job.key);
-                    }}
-                    onResume={() => {
-                      haptic.toggle(true);
-                      resume(job.key);
-                    }}
+                    selecting={selecting}
+                    selected={!!picked?.has(job.key)}
+                    onPress={() => (selecting ? togglePick(job.key) : job.state === 'done' && job.file ? open(job) : job.retry?.())}
+                    onLongPress={() => (selecting ? togglePick(job.key) : startPick(job.key))}
                   />
                 </Animated.View>
               ))}
@@ -983,32 +957,41 @@ export function Session({
       <View style={[st.dock, { paddingBottom: insets.bottom + 10 }]} pointerEvents="box-none">
         <View style={st.fade} pointerEvents="none" />
         {selecting ? (
-          <Animated.View key="select" entering={ENTER} style={{ flexDirection: 'row', gap: 10 }}>
+          <Animated.View key="select" entering={ENTER} style={st.actionBar}>
             <Press
-              grow
-              style={[st.send, { backgroundColor: t.accentSoft }]}
-              disabled={!selected!.size || !online}
+              style={st.barClose}
               onPress={() => {
-                haptic.tap();
-                get(pickedFiles);
-                setSelected(null);
+                haptic.select();
+                setPicked(null);
               }}
+              hitSlop={8}
               accessibilityRole="button"
-              accessibilityLabel="Download"
+              accessibilityLabel="Done selecting"
             >
-              <Ionicons name="arrow-down" size={19} color={t.onAccentSoft} />
-              <Text style={[st.sendText, { color: t.onAccentSoft }]}>Download</Text>
+              <Ionicons name="close" size={18} color={t.text} />
+            </Press>
+            <Text style={st.barCount} numberOfLines={1}>
+              {picked!.size ? `${picked!.size} selected` : 'Select files'}
+            </Text>
+            <Press
+              style={st.barBtn}
+              disabled={!picked!.size}
+              onPress={clearPicked}
+              accessibilityRole="button"
+              accessibilityLabel="Clear from list"
+            >
+              <Ionicons name="list-outline" size={16} color={t.text} />
+              <Text style={st.barBtnText}>Clear</Text>
             </Press>
             <Press
-              grow
-              style={[st.send, { backgroundColor: t.redSoft }]}
-              disabled={!selected!.size}
-              onPress={removeSelected}
+              style={[st.barBtn, { backgroundColor: t.redSoft }]}
+              disabled={!canDelete}
+              onPress={deletePicked}
               accessibilityRole="button"
-              accessibilityLabel="Remove"
+              accessibilityLabel="Delete from phone"
             >
-              <Ionicons name="trash-outline" size={19} color={t.red} />
-              <Text style={[st.sendText, { color: t.red }]}>Remove</Text>
+              <Ionicons name="trash-outline" size={16} color={t.red} />
+              <Text style={[st.barBtnText, { color: t.red }]}>Delete</Text>
             </Press>
           </Animated.View>
         ) : (
@@ -1098,14 +1081,20 @@ export function DeviceList({
   current,
   others,
   nearby,
+  away,
+  saved,
   onPick,
   onPair,
+  onForget,
 }: {
   current: Device;
   others: Device[];
   nearby: Found[];
+  away: SavedPeer[];
+  saved: SavedPeer[];
   onPick: (d: Device) => void;
   onPair: (f: Found) => void;
+  onForget: (p: SavedPeer) => void;
 }) {
   const [st, t] = useStyles(styles);
   const icon = (kind: Device['kind']) => (kind === 'laptop' ? ('laptop-outline' as const) : ('phone-portrait-outline' as const));
@@ -1118,14 +1107,18 @@ export function DeviceList({
     active: boolean,
     onPress?: () => void,
     action?: string,
+    onLongPress?: () => void,
   ) => (
     <Press
       key={key}
       style={st.devRow}
       highlight={onPress ? t.surface3 : undefined}
       onPress={onPress}
+      onLongPress={onLongPress}
+      delayLongPress={350}
       accessibilityRole={onPress ? 'button' : undefined}
       accessibilityLabel={`${name}, ${detail}${active ? ', connected' : ''}`}
+      accessibilityHint={onLongPress ? 'Long press to forget this phone' : undefined}
     >
       <View style={[st.devIcon, { backgroundColor: active ? t.accentSoft : t.surface3 }]}>
         <Ionicons name={ic} size={19} color={active ? t.onAccentSoft : t.text} />
@@ -1151,17 +1144,29 @@ export function DeviceList({
       )}
     </Press>
   );
+  // long-press a paired phone to forget it
+  const pairedTo = (d: Device) => saved.find((p) => `phone-${p.id}` === d.id);
+  const forgets = (d: Device) => {
+    const p = pairedTo(d);
+    return p && (() => onForget(p));
+  };
   return (
     <View style={{ gap: 18 }}>
       <View style={st.devGroup}>
-        {row(current.id, current.name, via(current), icon(current.kind), true)}
+        {row(current.id, current.name, via(current), icon(current.kind), true, undefined, undefined, forgets(current))}
         {others.map((d) => (
           <View key={d.id}>
             <View style={st.devSep} />
-            {row(d.id, d.name, via(d), icon(d.kind), false, () => onPick(d), 'Switch')}
+            {row(d.id, d.name, via(d), icon(d.kind), false, () => onPick(d), 'Switch', forgets(d))}
           </View>
         ))}
       </View>
+      {away.length > 0 && (
+        <View style={{ gap: 8 }}>
+          <Text style={st.devLabel}>Your phones</Text>
+          <SavedList peers={away} onForget={onForget} bg={t.surface2} />
+        </View>
+      )}
       {nearby.length > 0 && (
         <View style={{ gap: 8 }}>
           <Text style={st.devLabel}>Nearby phones</Text>
@@ -1175,12 +1180,82 @@ export function DeviceList({
           </View>
         </View>
       )}
-      {!others.length && !nearby.length && (
+      {!others.length && !nearby.length && !away.length && (
         <Text style={[st.meta, { paddingHorizontal: 4, lineHeight: 19 }]}>
           To add a device, plug in a USB cable, or open fshare on another phone on the same Wi-Fi.
         </Text>
       )}
     </View>
+  );
+}
+
+// Phones paired before that aren't reachable right now. They reconnect by themselves when back.
+export function SavedList({ peers, onForget, bg }: { peers: SavedPeer[]; onForget: (p: SavedPeer) => void; bg?: string }) {
+  const [st, t] = useStyles(styles);
+  return (
+    <View style={[st.devGroup, bg ? { backgroundColor: bg } : { backgroundColor: t.surface }]}>
+      {peers.map((p, i) => (
+        <View key={p.id}>
+          {i > 0 && <View style={st.devSep} />}
+          <View style={[st.devRow, { backgroundColor: 'transparent' }]} accessible accessibilityLabel={`${p.name}, not nearby`}>
+            <View style={[st.devIcon, { backgroundColor: bg ? t.surface3 : t.surface2 }]}>
+              <Ionicons name="phone-portrait-outline" size={19} color={t.dim} />
+            </View>
+            <View style={{ flex: 1, gap: 2 }}>
+              <Text style={[st.name, { color: t.dim }]} numberOfLines={1}>
+                {p.name}
+              </Text>
+              <Text style={st.meta} numberOfLines={1}>
+                Not nearby
+              </Text>
+            </View>
+            <Press
+              style={[st.devAction, { backgroundColor: bg ? t.surface3 : t.surface2 }]}
+              onPress={() => onForget(p)}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel={`Forget ${p.name}`}
+            >
+              <Text style={st.devActionText}>Forget</Text>
+            </Press>
+          </View>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+// "Visible to nearby phones" switch. Off: other phones don't list this one and can't ask to pair;
+// phones already paired still connect.
+export function VisibilityRow({ visible, onChange, bg }: { visible: boolean; onChange: (v: boolean) => void; bg?: string }) {
+  const [st, t] = useStyles(styles);
+  const [on, setOn] = useState(visible); // the sheet renders this once, so it keeps its own copy
+  return (
+    <Press
+      style={[st.devGroup, st.devRow, { backgroundColor: bg ?? t.surface }]}
+      highlight={bg ? t.surface3 : t.surface2}
+      onPress={() => {
+        haptic.toggle(!on);
+        setOn(!on);
+        onChange(!on);
+      }}
+      accessibilityRole="switch"
+      accessibilityState={{ checked: on }}
+      accessibilityLabel="Visible to nearby phones"
+    >
+      <View style={[st.devIcon, { backgroundColor: on ? t.accentSoft : bg ? t.surface3 : t.surface2 }]}>
+        <Ionicons name={on ? 'eye-outline' : 'eye-off-outline'} size={19} color={on ? t.onAccentSoft : t.dim} />
+      </View>
+      <View style={{ flex: 1, gap: 2 }}>
+        <Text style={st.name} numberOfLines={1}>
+          Visible to nearby phones
+        </Text>
+        <Text style={st.meta} numberOfLines={1}>
+          {on ? `Shown as ${myName}` : 'Paired phones only'}
+        </Text>
+      </View>
+      <Toggle on={on} />
+    </Press>
   );
 }
 
@@ -1274,85 +1349,67 @@ function LiveRow({ job, onCancel, onPause, onResume }: { job: Job; onCancel: () 
   );
 }
 
+// A finished transfer. Received files open on tap; failed ones retry; long-press selects.
 function JobRow({
   job,
   style,
   first,
-  onCancel,
-  onPause,
-  onResume,
+  selecting,
+  selected,
+  onPress,
+  onLongPress,
 }: {
   job: Job;
   style: StyleProp<ViewStyle>;
   first: boolean;
-  onCancel: () => void;
-  onPause: () => void;
-  onResume: () => void;
+  selecting: boolean;
+  selected: boolean;
+  onPress: () => void;
+  onLongPress: () => void;
 }) {
   const [st, t] = useStyles(styles);
-  const f = job.total ? job.done / job.total : 0;
-  const failed = (job.state === 'error' || job.state === 'cancelled') && !!job.retry;
-  const stopped = job.state === 'error' || job.state === 'cancelled';
-  const ringed = ['active', 'paused', 'saving'].includes(job.state);
-  const status: Record<State, string> = {
-    queued: 'Waiting',
-    preparing: 'Preparing',
-    active: `${Math.floor(f * 100)}%  ·  ${job.rate ? rate(job.rate) : fmt(job.done)}`,
-    paused: `Paused · ${Math.floor(f * 100)}%`,
-    saving: Platform.OS === 'ios' ? 'Saving to Files' : 'Saving to Downloads',
-    done: `${job.dir === 'up' ? `Sent to ${job.peer ?? 'laptop'}` : Platform.OS === 'ios' ? 'Saved to Files' : 'Saved to Downloads'} · ${fmt(job.total)}`,
-    cancelled: job.retry ? 'Cancelled · Tap to retry' : 'Cancelled',
-    error: job.retry ? 'Failed · Tap to retry' : 'Failed',
-  };
-  const tone =
-    job.state === 'done'
-      ? { fg: t.onAccentSoft, bg: t.accentSoft, icon: 'checkmark' as const }
-      : stopped
-        ? {
-            fg: job.state === 'error' ? t.red : t.dim,
-            bg: job.state === 'error' ? t.redSoft : t.surface3,
-            icon: failed ? ('refresh' as const) : ('close' as const),
-          }
-        : job.state === 'paused'
-          ? { fg: t.dim, bg: 'transparent', icon: 'pause' as const }
-          : {
-              fg: t.text,
-              bg: ringed ? 'transparent' : t.surface3,
-              icon: job.dir === 'up' ? ('arrow-up' as const) : ('arrow-down' as const),
-            };
+  const name = job.name.split('/').pop()!;
+  const failed = job.state === 'error' || job.state === 'cancelled';
+  const opens = job.state === 'done' && job.dir === 'down' && !!job.file;
+  const status = failed
+    ? `${job.state === 'error' ? 'Failed' : 'Cancelled'}${job.retry ? ' · Tap to retry' : ''}`
+    : job.dir === 'up'
+      ? `Sent to ${job.peer ?? 'laptop'} · ${fmt(job.total)}`
+      : `${job.peer ? `From ${job.peer}` : Platform.OS === 'ios' ? 'Saved to Files' : 'Saved to Downloads'} · ${fmt(job.total)}`;
+  const thumb = failed
+    ? {
+        bg: job.state === 'error' ? t.redSoft : t.surface2,
+        fg: job.state === 'error' ? t.red : t.dim,
+        icon: job.retry ? ('refresh' as const) : ('close' as const),
+      }
+    : job.dir === 'up'
+      ? { bg: t.surface2, fg: t.dim, icon: 'arrow-up' as const }
+      : { bg: t.accentSoft, fg: t.onAccentSoft, icon: fileIcon(name) };
   return (
     <Press
-      style={style}
-      highlight={failed ? t.surface2 : undefined}
-      onPress={
-        failed
-          ? () => {
-              haptic.tap();
-              job.retry?.();
-            }
-          : undefined
-      }
-      accessibilityRole={failed ? 'button' : undefined}
-      accessibilityLabel={`${job.name.split('/').pop()}, ${status[job.state]}${failed ? ', double tap to retry' : ''}`}
+      style={[style, selected && { backgroundColor: t.surface2 }]}
+      highlight={t.surface2}
+      onPress={selecting || opens || (failed && job.retry) ? onPress : undefined}
+      onLongPress={onLongPress}
+      delayLongPress={350}
+      accessibilityRole="button"
+      accessibilityState={selecting ? { selected } : undefined}
+      accessibilityLabel={`${name}, ${status}`}
+      accessibilityHint={selecting ? undefined : opens ? 'Opens the file. Long press to select' : 'Long press to select'}
     >
       {!first && <View style={st.sep} />}
-      <Animated.View style={[st.badge, { backgroundColor: tone.bg, transitionProperty: 'backgroundColor', transitionDuration: 200 }]}>
-        {ringed && <Ring f={job.state === 'saving' ? 1 : f} color={job.state === 'paused' ? t.faint : t.accent} track={t.surface3} />}
-        <Pop id={tone.icon}>
-          <Ionicons name={tone.icon} size={17} color={tone.fg} />
-        </Pop>
-      </Animated.View>
+      <View style={[st.thumb, { backgroundColor: thumb.bg }]}>
+        <Ionicons name={thumb.icon} size={19} color={thumb.fg} />
+      </View>
       <View style={st.cellText}>
         <Text style={st.name} numberOfLines={1}>
-          {job.name.split('/').pop()}
+          {name}
         </Text>
         <Text style={[st.meta, st.num, job.state === 'error' && { color: t.red }]} numberOfLines={1}>
-          {status[job.state]}
+          {status}
         </Text>
       </View>
-      {job.state === 'active' && job.done > 0 && !job.incoming && <IconButton icon="pause" onPress={onPause} label={`Pause ${job.name}`} />}
-      {job.state === 'paused' && !job.incoming && <IconButton icon="play" tone="filled" onPress={onResume} label={`Resume ${job.name}`} />}
-      {CANCELLABLE.includes(job.state) && <IconButton icon="close" onPress={onCancel} label={`Cancel ${job.name}`} />}
+      {selecting ? <Check state={selected ? 'all' : 'none'} /> : opens && <Ionicons name="open-outline" size={17} color={t.faint} />}
     </Press>
   );
 }
@@ -1398,16 +1455,44 @@ const styles = (t: Theme) =>
     },
     chipText: { fontSize: 12, fontWeight: '600', letterSpacing: 0.1 },
     deviceTap: { flexDirection: 'row', alignItems: 'center', gap: 14, margin: -8, padding: 8, borderRadius: 18, borderCurve: 'continuous' },
-    more: { width: 40, height: 40, borderRadius: 20, backgroundColor: t.surface2, alignItems: 'center', justifyContent: 'center' },
-    switcher: {
-      width: 22,
-      height: 22,
-      borderRadius: 11,
-      backgroundColor: t.surface2,
+    actions: {
+      flexDirection: 'row',
       alignItems: 'center',
-      justifyContent: 'center',
-      marginLeft: 4,
+      padding: 3,
+      borderRadius: 23,
+      backgroundColor: t.surface2,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: t.line,
     },
+    action: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center' },
+    actionSep: { width: StyleSheet.hairlineWidth, height: 18, backgroundColor: t.line },
+    actionBar: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      height: 64,
+      paddingLeft: 12,
+      paddingRight: 8,
+      borderRadius: 22,
+      borderCurve: 'continuous',
+      backgroundColor: t.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: t.line,
+      boxShadow: t.scheme === 'dark' ? '0 8px 24px rgba(0,0,0,0.5)' : '0 8px 24px rgba(20,24,10,0.12)',
+    },
+    barClose: { width: 36, height: 36, borderRadius: 18, backgroundColor: t.surface2, alignItems: 'center', justifyContent: 'center' },
+    barCount: { flex: 1, color: t.text, fontSize: 15, fontWeight: '600', marginLeft: 4 },
+    barBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      height: 46,
+      paddingHorizontal: 16,
+      borderRadius: 15,
+      borderCurve: 'continuous',
+      backgroundColor: t.surface2,
+    },
+    barBtnText: { color: t.text, fontSize: 14, fontWeight: '600' },
     check: { width: 26, height: 26, borderRadius: 13, borderWidth: 2, alignItems: 'center', justifyContent: 'center', marginRight: 5 },
     devGroup: { backgroundColor: t.surface2, borderRadius: 18, borderCurve: 'continuous', overflow: 'hidden' },
     devRow: {
@@ -1447,12 +1532,22 @@ const styles = (t: Theme) =>
       alignItems: 'center',
       justifyContent: 'center',
       gap: 10,
-      height: 58,
-      borderRadius: 18,
+      height: 60,
+      borderRadius: 20,
       borderCurve: 'continuous',
-      backgroundColor: t.accent,
+      backgroundColor: t.accent, // under the gradient, in case it can't draw
+      // flat, with just a hint of depth: a barely-there top-to-bottom shade, a faint rim,
+      // 1px light on the top inner edge, 1px shade on the bottom, and a hairline shadow
+      borderWidth: 1,
+      borderColor: t.scheme === 'dark' ? '#B5E356' : '#42600A',
+      experimental_backgroundImage:
+        t.scheme === 'dark' ? 'linear-gradient(180deg, #CCF676 0%, #C2F065 100%)' : 'linear-gradient(180deg, #507308 0%, #476703 100%)',
+      boxShadow:
+        t.scheme === 'dark'
+          ? 'inset 0 1px 0 rgba(255,255,255,0.3), inset 0 -1px 0 rgba(70,100,0,0.18), 0 1px 2px rgba(0,0,0,0.3)'
+          : 'inset 0 1px 0 rgba(255,255,255,0.14), inset 0 -1px 0 rgba(0,0,0,0.1), 0 1px 2px rgba(40,60,0,0.2)',
     },
-    sendText: { color: t.onAccent, fontSize: 17, fontWeight: '700' },
+    sendText: { color: t.onAccent, fontSize: 17, fontWeight: '700', letterSpacing: -0.2 },
 
     empty: { alignItems: 'center', gap: 8, paddingVertical: 56, paddingHorizontal: 28 },
     emptyTitle: { color: t.text, fontSize: 17, fontWeight: '700', marginTop: 10 },

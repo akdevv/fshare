@@ -1,5 +1,6 @@
 import { eta, fileIcon, fmt, rate } from '../theme';
-import { group, type Remote } from '../session';
+import { summary } from '../session';
+import { mimeOf } from '../open';
 
 test('sizes read naturally', () => {
   expect(fmt(512)).toBe('1 KB');
@@ -24,15 +25,15 @@ test('file icons by type', () => {
   expect(fileIcon('Makefile')).toBe('document-outline');
 });
 
-test('shared folders collapse into one row and expand on demand', () => {
-  const remote: Remote[] = [
-    { id: 0, path: 'a.txt', size: 1 },
-    { id: 1, path: 'trip/1.jpg', size: 10 },
-    { id: 2, path: 'trip/day2/2.jpg', size: 20 },
-  ];
-  const closed = group(remote, new Set());
-  expect(closed.map((r) => r.kind)).toEqual(['file', 'folder']);
-  expect(closed[1]).toMatchObject({ name: 'trip', size: 30, open: false });
-  const open = group(remote, new Set(['trip']));
-  expect(open.map((r) => r.kind)).toEqual(['file', 'folder', 'file', 'file']);
+test('file lists summarize to one line', () => {
+  expect(summary(['a.jpg'])).toBe('a.jpg');
+  expect(summary(['a.jpg', 'b.jpg'])).toBe('a.jpg and b.jpg');
+  expect(summary(['a.jpg', 'b.jpg', 'c.mov', 'd.pdf'])).toBe('a.jpg and 3 more');
+});
+
+test('received files open with the right app type', () => {
+  expect(mimeOf('IMG_20.JPG')).toBe('image/jpeg');
+  expect(mimeOf('clip.mov')).toBe('video/quicktime');
+  expect(mimeOf('notes.pdf')).toBe('application/pdf');
+  expect(mimeOf('mystery.xyz')).toBe('*/*');
 });

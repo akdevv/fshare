@@ -30,7 +30,8 @@ const PKG_VERSION = (() => {
   return "?";
 })(); // the app shows a "restart fshare" hint when a laptop runs an older build
 
-export type Shared = { id: number; path: string; size: number; abs: string };
+// `delivered`: phones (by app id) that already downloaded it, so each phone gets each file once
+export type Shared = { id: number; path: string; size: number; abs: string; delivered?: Set<string> };
 
 // Split a line of drag-and-dropped paths. Handles 'quotes', "quotes" and back\ slash escapes.
 export function parsePaths(line: string): string[] {
@@ -145,7 +146,11 @@ export function clip(s: string, n: number): string {
 type Active = { name: string; dir: "up" | "down"; done: number; total: number; rate: number; last: number; cancel: () => void };
 type Client = { name: string; usb: boolean; seen: number };
 
+// Files dropped into the terminal wait here until you confirm sending them.
+export type Pending = { label: string; count: number; size: number; commit: () => void };
+
 export class UI {
+  pending: Pending | null = null;
   active = new Set<Active>();
   clients = new Map<string, Client>(); // phones polling us, by name + link
   input = "";
@@ -206,16 +211,27 @@ export class UI {
     return `  ${arrow} ${shorten(label, Math.min(32, room))}  ${bar(f, 20)}${tail}`;
   }
 
+  confirm(): string | null {
+    const p = this.pending;
+    if (!p) return null;
+    const names = [...new Set([...this.clients.values()].map((x) => x.name))];
+    const to = names.length ? names.join(" and ") : "the next phone that connects";
+    const what = p.count === 1 ? p.label : `${p.label}${p.count > 1 ? ` (${p.count} files)` : ""}`;
+    return `  ${c.yellow("?")} Send ${c.bold(what)} ${c.dim(`· ${fmt(p.size)}`)} to ${c.bold(to)}?   ${c.lime("y")} ${c.dim("send ·")} ${c.bold("n")} ${c.dim("cancel")}`;
+  }
+
   done = false; // quitting: leave the live area off the screen
   private draw() {
     if (!this.tty || this.done) return;
     const w = process.stdout.columns || 100;
-    const prompt = this.input
-      ? `  ${c.cyan("›")} ${this.input.length > w - 6 ? "…" + this.input.slice(-(w - 7)) : this.input}`
-      : `  ${c.cyan("›")} ${c.dim("drop files here + Enter")}   ${c.dim("q")} ${c.dim("Wi-Fi QR ·")} ${c.dim("x")} ${c.dim("cancel ·")} ${c.dim("ctrl+c")} ${c.dim("quit")}`;
+    const prompt =
+      this.confirm() ??
+      (this.input
+        ? `  ${c.cyan("›")} ${this.input.length > w - 6 ? "…" + this.input.slice(-(w - 7)) : this.input}`
+        : `  ${c.cyan("›")} ${c.dim("drop files here + Enter")}   ${c.dim("q")} ${c.dim("Wi-Fi QR ·")} ${c.dim("x")} ${c.dim("cancel ·")} ${c.dim("ctrl+c")} ${c.dim("quit")}`);
     const lines = ["", this.status(), this.progress(w), prompt].filter((l): l is string => l !== null).map((l) => clip(l, w - 1));
     process.stdout.write(lines.join("\n"));
-    if (!this.input) process.stdout.write(`\r\x1b[4C`); // park the cursor right after "›"
+    if (!this.input && !this.pending) process.stdout.write(`\r\x1b[4C`); // park the cursor right after "›"
     this.drawn = lines.length;
   }
 }
@@ -269,6 +285,7 @@ export function createServer(opts: { token: string; outDir: string; shared: Shar
       return;
     }
 
+    const phone = url.searchParams.get("c"); // the app's id, to hand each phone each file once
     if (req.method === "GET" && url.pathname === "/list") {
       const addr = req.socket.remoteAddress?.replace("::ffff:", "") ?? "";
       const client = req.headers["x-fshare-client"];
@@ -280,7 +297,7 @@ export function createServer(opts: { token: string; outDir: string; shared: Shar
           "x-fshare-version": VERSION,
           "x-fshare-kind": "laptop",
         })
-        .end(JSON.stringify(shared.map(({ id, path, size }) => ({ id, path, size }))));
+        .end(JSON.stringify(shared.filter((s) => !(phone && s.delivered?.has(phone))).map(({ id, path, size }) => ({ id, path, size }))));
       return;
     }
 
@@ -329,6 +346,7 @@ export function createServer(opts: { token: string; outDir: string; shared: Shar
       try {
         await pipeline(src, res);
         untrack();
+        if (phone) (f.delivered ??= new Set()).add(phone);
         ui.log(`  ${c.green("✓")} Sent      ${f.path}  ${took(t0, f.size)}`);
       } catch {
         untrack();
@@ -746,7 +764,7 @@ async function main() {
           Wi-Fi: press ${c.bold("q")}, then scan the QR code in the app
 
   ${c.bold("While running")}
-          drop files or folders into the terminal + Enter   share them with the phone
+          drop files or folders into the terminal + Enter   send them to the phone (asks first)
           ${c.bold("q")}   show the Wi-Fi QR code
           ${c.bold("x")}   cancel all transfers (partial files are deleted)
 
@@ -768,19 +786,40 @@ async function main() {
   const shared: Shared[] = [];
   let nextId = 0; // ids stay unique when files are removed from the list
   const ui = new UI();
-  const add = (paths: string[]) => {
-    for (const p of paths) {
+  // Shared files are pushed: every connected phone downloads them by itself.
+  const expandAll = (paths: string[]) =>
+    paths.flatMap((p) => {
       try {
-        const files = expand(p);
-        for (const f of files) shared.push({ id: nextId++, path: f.rel, size: f.size, abs: f.abs });
-        const size = fmt(files.reduce((s, f) => s + f.size, 0));
-        ui.log(
-          `  ${c.cyan("+")} Sharing   ${path.basename(p)}  ${c.dim(`${files.length} file${files.length === 1 ? "" : "s"} · ${size}`)}`,
-        );
+        return [{ p, files: expand(p) }];
       } catch (e: any) {
         ui.log(`  ${c.red("!")} ${p}: ${e.code === "ENOENT" ? "not found" : (e.code ?? e.message)}`);
+        return [];
       }
+    });
+  const add = (paths: string[]) => {
+    for (const { p, files } of expandAll(paths)) {
+      for (const f of files) shared.push({ id: nextId++, path: f.rel, size: f.size, abs: f.abs });
+      const size = fmt(files.reduce((s, f) => s + f.size, 0));
+      ui.log(`  ${c.cyan("↓")} Sending   ${path.basename(p)}  ${c.dim(`${files.length} file${files.length === 1 ? "" : "s"} · ${size}`)}`);
     }
+  };
+  // dropped into the terminal: ask first, since a drop is easy to do by accident
+  const stage = (paths: string[]) => {
+    const found = expandAll(paths);
+    const count = found.reduce((n, x) => n + x.files.length, 0);
+    if (!count) return found.length && ui.log(c.dim("  Nothing to send (empty folder)"));
+    ui.pending = {
+      label: found.length === 1 ? path.basename(found[0].p) : `${path.basename(found[0].p)} and ${found.length - 1} more`,
+      count,
+      size: found.reduce((n, x) => n + x.files.reduce((m, f) => m + f.size, 0), 0),
+      commit: () => add(found.map((x) => x.p)),
+    };
+  };
+  const answer = (yes: boolean) => {
+    const p = ui.pending!;
+    ui.pending = null;
+    if (yes) p.commit();
+    else ui.log(c.dim(`  Not sent: ${p.label}`));
   };
 
   let wifiUrl = "";
@@ -840,14 +879,20 @@ async function main() {
   process.stdin.setRawMode(true);
   process.stdin.setEncoding("utf8");
   process.stdin.on("data", (chunk: string) => {
-    if (chunk.startsWith("\x1b")) return; // arrow keys etc.
+    if (chunk === "\x1b" && ui.pending) answer(false); // Esc
+    if (chunk.startsWith("\x1b")) return ui.redraw(); // arrow keys etc.
     for (const ch of chunk) {
       if (ch === "\x03" || ch === "\x04") return quit();
+      if (ui.pending) {
+        if (/[yY\r\n]/.test(ch)) answer(true);
+        else if (/[nN]/.test(ch)) answer(false);
+        continue;
+      }
       if (ch === "\r" || ch === "\n") {
         const l = ui.input.trim();
         ui.input = "";
         ui.redraw();
-        if (l) (commands[l] ?? (() => add(parsePaths(l))))();
+        if (l) (commands[l] ?? (() => stage(parsePaths(l))))();
       } else if (ch === "\x7f" || ch === "\b") ui.input = ui.input.slice(0, -1);
       else if (ch === "\x15")
         ui.input = ""; // ctrl+u

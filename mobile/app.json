@@ -15,9 +15,11 @@
           "NSAllowsLocalNetworking": true
         },
         "UIFileSharingEnabled": true,
-        "LSSupportsOpeningDocumentsInPlace": true
+        "LSSupportsOpeningDocumentsInPlace": true,
+        "NSBonjourServices": ["_fshare._tcp"]
       },
-      "buildNumber": "10000"
+      "buildNumber": "10000",
+      "icon": "./assets/fshare.icon"
     },
     "android": {
       "adaptiveIcon": {
@@ -72,7 +74,8 @@
         }
       ],
       "expo-asset",
-      "./plugins/with-release-signing"
+      "./plugins/with-release-signing",
+      "./plugins/with-scene-lifecycle"
     ]
   }
 }

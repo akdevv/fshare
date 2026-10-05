@@ -1,20 +1,28 @@
 import { useEffect, useRef, useState } from 'react';
-import { StyleSheet, Text, TextInput, View } from 'react-native';
+import { Platform, StyleSheet, Text, TextInput, View } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { StatusBar } from 'expo-status-bar';
-import * as Crypto from 'expo-crypto';
 import { File, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
-import { readPrefs, writePrefs } from './prefs';
-import { Session, type Device } from './session';
-import { Sheet, type SheetContent } from './sheet';
+import { readPrefs, writePrefs, type SavedPeer } from './prefs';
+import { Session, SavedList, VisibilityRow, type Device } from './session';
+import { Behind, Sheet, type SheetContent } from './sheet';
 import { Onboarding } from './onboarding';
-import { CABLE, myName, Peer, SERVER_PORT, type Found } from './modules/fshare-peer';
+import { Splash } from './splash';
+import { CABLE, Peer, SERVER_PORT, type Found } from './modules/fshare-peer';
+import { me } from './identity';
 import { Ionicons } from '@expo/vector-icons';
 import { haptic, ThemeProvider, useStyles, useTheme, type Theme } from './theme';
 import Animated, { Easing, FadeInDown, ReduceMotion, useReducedMotion } from 'react-native-reanimated';
 import { Cookie, EASE_OUT, Press } from './ui';
+import {
+  useFonts,
+  PlusJakartaSans_500Medium,
+  PlusJakartaSans_600SemiBold,
+  PlusJakartaSans_700Bold,
+  PlusJakartaSans_800ExtraBold,
+} from '@expo-google-fonts/plus-jakarta-sans';
 
 // `fshare` on the laptop tunnels this port over the USB cable (adb reverse) when the phone is plugged in
 const USB = 'http://127.0.0.1:4747';
@@ -31,18 +39,6 @@ async function get(url: string, ms = 1500) {
     clearTimeout(t);
   }
 }
-
-// the name and pairing secrets this phone uses when other phones connect to it
-function identity() {
-  let { myToken, myId } = readPrefs();
-  if (!myToken || !myId) {
-    myToken = Crypto.randomUUID().replace(/-/g, '');
-    myId = Crypto.randomUUID();
-    writePrefs({ myToken, myId });
-  }
-  return { token: myToken, id: myId, name: myName };
-}
-const me = identity();
 
 // Files shared into fshare from another app (Gallery › Share › fshare). Only the installed app
 // can receive shares; in Expo Go the native side is missing, so this quietly does nothing.
@@ -76,6 +72,14 @@ function useOutbox() {
 }
 
 export default function App() {
+  // the native splash stays up until the typeface is ready, so text never flashes in another font
+  const [fonts] = useFonts({
+    PlusJakartaSans_500Medium,
+    PlusJakartaSans_600SemiBold,
+    PlusJakartaSans_700Bold,
+    PlusJakartaSans_800ExtraBold,
+  });
+  if (!fonts) return null;
   return (
     <ThemeProvider>
       <Root />
@@ -86,6 +90,8 @@ export default function App() {
 // where a device was found, most preferred first: a cable beats Wi-Fi
 const RANK = ['laptop-usb', 'cable', 'laptop-wifi'];
 
+const phone = (p: SavedPeer): Device => ({ id: `phone-${p.id}`, name: p.name, base: p.base, token: p.token, kind: 'phone', via: 'wifi' });
+
 function Root() {
   const t = useTheme();
   const [devices, setDevices] = useState<Device[]>([]); // reachable right now
@@ -95,9 +101,42 @@ function Root() {
   const [sheet, setSheet] = useState<SheetContent | null>(null);
   const [outbox, clearOutbox] = useOutbox();
   const [onboarded, setOnboarded] = useState(() => !!readPrefs().onboarded);
-  const paired = useRef<Device[]>([]); // phones paired over Wi-Fi this session
+  const [saved, setSaved] = useState<SavedPeer[]>(() => readPrefs().peers ?? []); // phones paired over Wi-Fi, kept across launches
+  const [visible, setVisible] = useState(() => !readPrefs().hidden);
   const cur = useRef(current);
   cur.current = current;
+  const savedRef = useRef(saved);
+  savedRef.current = saved;
+  const nearbyRef = useRef(nearby);
+  nearbyRef.current = nearby;
+
+  const remember = (p: SavedPeer) => {
+    const next = [...savedRef.current.filter((x) => x.id !== p.id), p];
+    savedRef.current = next;
+    writePrefs({ peers: next });
+    setSaved(next);
+  };
+  const forget = (p: SavedPeer) => {
+    const next = savedRef.current.filter((x) => x.id !== p.id);
+    savedRef.current = next;
+    writePrefs({ peers: next });
+    setSaved(next);
+    setDevices((ds) => ds.filter((d) => d.id !== `phone-${p.id}`));
+    if (cur.current?.id === `phone-${p.id}`) setCurrent(null);
+  };
+  const askForget = (p: SavedPeer) => {
+    haptic.reject();
+    setSheet({
+      title: `Forget ${p.name}?`,
+      message: "To send files to each other again, you'll need to pair again.",
+      actions: [{ label: 'Forget', icon: 'trash-outline', destructive: true, onPress: () => forget(p) }],
+    });
+  };
+  const changeVisible = (v: boolean) => {
+    setVisible(v);
+    writePrefs({ hidden: !v });
+    Peer?.setVisible(v);
+  };
 
   const choose = (d: Device) => {
     setCurrent(d);
@@ -107,7 +146,7 @@ function Root() {
   // Peer server + discovery (installed Android app only)
   useEffect(() => {
     if (!Peer) return;
-    Peer.start(me.token, me.name, me.id);
+    Peer.start(me.token, me.name, me.id, !readPrefs().hidden);
     const subs = [
       Peer.addListener('peerFound', (f) => f.id !== me.id && setNearby((n) => [...n.filter((x) => x.name !== f.name), f])),
       Peer.addListener('peerLost', ({ name }) => setNearby((n) => n.filter((x) => x.name !== name))),
@@ -123,15 +162,9 @@ function Root() {
               icon: 'checkmark',
               onPress: () => {
                 Peer!.answerPair(r.id, true);
-                const d: Device = {
-                  id: `phone-${r.host}`,
-                  name: r.name,
-                  base: `http://${r.host}:${r.port}`,
-                  token: r.token,
-                  kind: 'phone',
-                  via: 'wifi',
-                };
-                paired.current = [...paired.current.filter((p) => p.id !== d.id), d];
+                const p = { id: r.peer || r.host, name: r.name, token: r.token, base: `http://${r.host}:${r.port}` };
+                remember(p);
+                const d = phone(p);
                 setDevices((ds) => [...ds.filter((x) => x.id !== d.id), d]);
                 choose(d);
               },
@@ -184,7 +217,7 @@ function Root() {
         });
       }
       // the accessory cable: another phone, or a laptop when USB debugging is off (then adb isn't there)
-      if (Peer && !usbToken) {
+      if (Peer && Platform.OS === 'android' && !usbToken) {
         const cableToken = await get(`${CABLE}/pair`);
         const n = cableToken && (await name(CABLE, cableToken));
         if (cableToken && n) {
@@ -198,9 +231,20 @@ function Root() {
         if (n && !found.some((d) => d.kind === 'laptop'))
           found.push({ id: 'laptop-wifi', name: n.name, base: lan, token, kind: 'laptop', via: 'wifi' });
       }
-      for (const p of paired.current) {
-        const n = await name(p.base, p.token);
-        if (n) found.push({ ...p, name: n.name });
+      // paired phones: try the address it's announcing now, else where it was last time
+      const back = await Promise.all(
+        savedRef.current.map(async (p) => {
+          const f = nearbyRef.current.find((x) => x.id === p.id);
+          const base = f ? `http://${f.host}:${f.port}` : p.base;
+          const n = await name(base, p.token);
+          return n && { ...p, base, name: n.name };
+        }),
+      );
+      for (const p of back) {
+        if (!p) continue;
+        const old = savedRef.current.find((x) => x.id === p.id);
+        if (old && (old.base !== p.base || old.name !== p.name)) remember(p);
+        found.push(phone(p));
       }
       if (!alive) return;
       setDevices(found);
@@ -235,13 +279,14 @@ function Root() {
     const timer = setTimeout(() => ctrl.abort(), 65000);
     try {
       const base = `http://${f.host}:${f.port}`;
-      const r = await fetch(`${base}/hello?name=${encodeURIComponent(me.name)}&port=${SERVER_PORT}&token=${me.token}`, {
+      const r = await fetch(`${base}/hello?name=${encodeURIComponent(me.name)}&port=${SERVER_PORT}&token=${me.token}&id=${me.id}`, {
         method: 'POST',
         signal: ctrl.signal,
       });
       if (!r.ok) throw new Error('declined');
-      const d: Device = { id: `phone-${f.host}`, name: f.name, base, token: await r.text(), kind: 'phone', via: 'wifi' };
-      paired.current = [...paired.current.filter((p) => p.id !== d.id), d];
+      const p = { id: f.id || f.host, name: f.name, token: await r.text(), base };
+      remember(p);
+      const d = phone(p);
       setDevices((ds) => [...ds.filter((x) => x.id !== d.id), d]);
       setSheet(null);
       haptic.success();
@@ -268,40 +313,62 @@ function Root() {
     setCurrent(d);
   };
 
-  const others = nearby.filter((f) => !devices.some((d) => d.base === `http://${f.host}:${f.port}`));
+  // phones to offer pairing with: not hidden, not already paired
+  const others = nearby.filter(
+    (f) => !f.hidden && !saved.some((p) => p.id === f.id) && !devices.some((d) => d.base === `http://${f.host}:${f.port}`),
+  );
+  const away = saved.filter((p) => !devices.some((d) => d.id === `phone-${p.id}`)); // paired, not reachable right now
   return (
-    <SafeAreaProvider style={{ backgroundColor: t.bg }}>
+    // black shows around the screen when a sheet pushes it back
+    <SafeAreaProvider style={{ backgroundColor: '#000' }}>
       <StatusBar style={t.scheme === 'dark' ? 'light' : 'dark'} />
-      {!onboarded ? (
-        <Onboarding
-          onDone={() => {
-            writePrefs({ onboarded: true });
-            setOnboarded(true);
-          }}
-        />
-      ) : current ? (
-        <Session
-          device={current}
-          devices={devices}
-          nearby={others}
-          outbox={outbox}
-          clearOutbox={clearOutbox}
-          onPick={(d) => {
-            haptic.select();
-            choose(d);
-          }}
-          onPair={pair}
-          onWifi={() => {
-            setQr(true);
-            setCurrent(null);
-          }}
-        />
-      ) : qr ? (
-        <Scanner onConnect={scanned} onBack={() => setQr(false)} />
-      ) : (
-        <Waiting onWifi={() => setQr(true)} nearby={others} onPair={pair} outbox={outbox.length} />
-      )}
+      <Behind style={{ backgroundColor: t.bg }}>
+        {!onboarded ? (
+          <Onboarding
+            onDone={() => {
+              writePrefs({ onboarded: true });
+              setOnboarded(true);
+            }}
+          />
+        ) : current ? (
+          <Session
+            device={current}
+            devices={devices}
+            nearby={others}
+            away={away}
+            saved={saved}
+            onForget={askForget}
+            visible={visible}
+            onVisible={changeVisible}
+            outbox={outbox}
+            clearOutbox={clearOutbox}
+            onPick={(d) => {
+              haptic.select();
+              choose(d);
+            }}
+            onPair={pair}
+            onWifi={() => {
+              setQr(true);
+              setCurrent(null);
+            }}
+          />
+        ) : qr ? (
+          <Scanner onConnect={scanned} onBack={() => setQr(false)} />
+        ) : (
+          <Waiting
+            onWifi={() => setQr(true)}
+            nearby={others}
+            onPair={pair}
+            outbox={outbox.length}
+            away={away}
+            onForget={askForget}
+            visible={visible}
+            onVisible={changeVisible}
+          />
+        )}
+      </Behind>
       <Sheet content={sheet} onClose={() => setSheet(null)} />
+      <Splash />
     </SafeAreaProvider>
   );
 }
@@ -327,7 +394,25 @@ function Ripple({ delay }: { delay: number }) {
   );
 }
 
-function Waiting({ onWifi, nearby, onPair, outbox }: { onWifi: () => void; nearby: Found[]; onPair: (f: Found) => void; outbox: number }) {
+function Waiting({
+  onWifi,
+  nearby,
+  onPair,
+  outbox,
+  away,
+  onForget,
+  visible,
+  onVisible,
+}: {
+  onWifi: () => void;
+  nearby: Found[];
+  onPair: (f: Found) => void;
+  outbox: number;
+  away: SavedPeer[];
+  onForget: (p: SavedPeer) => void;
+  visible: boolean;
+  onVisible: (v: boolean) => void;
+}) {
   const [st, t] = useStyles(styles);
   const reduced = useReducedMotion();
   const phones = !!Peer; // the installed Android app can also connect to other phones
@@ -352,15 +437,17 @@ function Waiting({ onWifi, nearby, onPair, outbox }: { onWifi: () => void; nearb
           {phones ? 'Connect a device' : 'Connect to your laptop'}
         </Animated.Text>
         <Animated.Text entering={rise(140)} style={st.text}>
-          {phones
-            ? 'Plug a USB cable into your laptop (running fshare) or another phone, or pick a phone nearby.'
-            : 'Plug in the USB cable and run fshare on your laptop. It connects by itself.'}
+          {!phones
+            ? 'Plug in the USB cable and run fshare on your laptop. It connects by itself.'
+            : Platform.OS === 'ios'
+              ? 'Pick a phone nearby, or scan the QR code from fshare on your laptop.'
+              : 'Plug a USB cable into your laptop (running fshare) or another phone, or pick a phone nearby.'}
         </Animated.Text>
         {outbox > 0 && (
           <Animated.View entering={rise(0)} style={st.outbox}>
             <Ionicons name="arrow-up-circle" size={18} color={t.onAccentSoft} />
             <Text style={st.outboxText}>
-              {outbox} {outbox === 1 ? 'file' : 'files'} will send once you connect
+              {outbox} {outbox === 1 ? 'file' : 'files'} ready to send. Connect a device to choose where.
             </Text>
           </Animated.View>
         )}
@@ -390,6 +477,17 @@ function Waiting({ onWifi, nearby, onPair, outbox }: { onWifi: () => void; nearb
           </View>
         </Animated.View>
       )}
+      {phones && away.length > 0 && (
+        <Animated.View entering={rise(0)} style={{ gap: 10, marginBottom: 12 }}>
+          <Text style={st.nearbyTitle}>Your phones</Text>
+          <SavedList peers={away} onForget={onForget} />
+        </Animated.View>
+      )}
+      {phones && (
+        <Animated.View entering={rise(210)} style={{ marginBottom: 12 }}>
+          <VisibilityRow visible={visible} onChange={onVisible} />
+        </Animated.View>
+      )}
       <Animated.View entering={rise(210)}>
         <Press
           style={st.secondary}
@@ -401,7 +499,7 @@ function Waiting({ onWifi, nearby, onPair, outbox }: { onWifi: () => void; nearb
           accessibilityLabel="Connect to a laptop over Wi-Fi"
         >
           <Ionicons name="qr-code-outline" size={18} color={t.text} />
-          <Text style={st.secondaryText}>{phones ? 'Laptop over Wi-Fi' : 'Use Wi-Fi instead'}</Text>
+          <Text style={st.secondaryText}>Connect over Wi-Fi</Text>
         </Press>
       </Animated.View>
     </SafeAreaView>
