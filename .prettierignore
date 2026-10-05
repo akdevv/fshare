@@ -1,0 +1,9 @@
+node_modules/
+dist/
+mobile/android/
+mobile/ios/
+mobile/.expo/
+package-lock.json
+*.md
+docs/
+mobile/modules/*/android/build/
