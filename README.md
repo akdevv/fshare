@@ -2,6 +2,16 @@
 
 Fast file transfer between laptop and phone, and phone to phone. Laptop runs a CLI, phones run an Expo app.
 
+## Install the CLI
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/akdevv/fshare/main/install.sh | sh
+```
+
+Needs git and Node.js 20.12+. It downloads fshare into `~/.fshare`, builds it, and puts `fshare` on
+your PATH. `fshare update` gets the latest version; `fshare uninstall` removes it (your pairing stays
+in `~/.config/fshare`).
+
 ## Use it
 
 1. Plug the phone into the laptop.
@@ -12,10 +22,13 @@ One-time: turn on **USB debugging** on the phone (Settings › About phone › t
 then Developer options › USB debugging) and tap "Always allow" when you first plug in.
 `fshare` downloads `adb` by itself if it isn't installed.
 
-- Drag more files/folders into the terminal + Enter to share them.
-- Files from the phone land in `~/Downloads` (`-o dir` to change).
-- `x` + Enter cancels all transfers (partial files are deleted). `q` + Enter shows the Wi-Fi QR.
-- `--new-pair` forgets paired phones.
+- `fshare send photo.jpg docs/` from any terminal sends to the phone through the fshare that's
+  already running (or starts one).
+- Or drag files/folders into the fshare window + Enter.
+- Files from the phone land in `~/Downloads` (`-o dir` to change), with a notification. `o` opens
+  that folder.
+- `x` cancels all transfers (partial files are deleted). `q` shows the Wi-Fi QR.
+- `--new-pair` forgets paired phones. `fshare help` lists everything.
 
 ### Without a cable
 
@@ -37,8 +50,7 @@ In Gallery or any app: Share › fshare. The files go to the connected device (o
 ## Setup
 
 ```sh
-npx fshare-cli                                   # laptop, no install (Node >= 20.12)
-cd cli && npm i && npm link                      # or from this repo
+cd cli && npm i && node fshare.ts                # the CLI from this repo
 cd mobile && npm i
 npx eas-cli build -p android --profile preview   # installable APK (recommended)
 # or for development: npx expo start  → open in Expo Go
@@ -73,6 +85,7 @@ npm run setup      # install everything (root tools, cli/, mobile/)
 npm run check      # what CI runs: format, lint, typecheck, unit + integration tests
 npm run format     # fix formatting
 npm run e2e        # end-to-end on this Mac (see below)
+npm run test:native  # the app's Android and iOS peer servers, built outside the app and driven from Node
 ```
 
 | Layer | What | Where |
@@ -98,11 +111,11 @@ built in CI. Build one before merging app changes you want to try on a phone.
 
 - **`.github/workflows/ci.yml`** runs on every pull request and push to `main`, in a few minutes:
   - checks (format, lint, types, tests, expo-doctor)
-  - CLI tests on Node 22/24 (Linux and macOS) plus a packed-install smoke test
+  - CLI tests on Node 22/24 (Linux and macOS), plus `install.sh` installing and uninstalling it
   - the CLI on Node 20
 - `main` is protected, including for admins: changes land through pull requests, and a PR can only
   merge once all checks pass and it's up to date with `main`.
-- **`.github/workflows/release.yml`** publishes the CLI when a `cli-v*` tag is pushed.
+- **`.github/workflows/release.yml`** tests the CLI and makes its GitHub release when a `cli-v*` tag is pushed.
 
 ## Versioning and releases
 
@@ -115,8 +128,8 @@ npm run release -- app minor        # 1. bump on a release branch and open a PR 
 npm run release:publish -- app      # 2. on main: tag it and publish
 ```
 
-- **CLI** (`cli/package.json`): publishing pushes `cli-vX.Y.Z`, and CI publishes `fshare-cli` to npm
-  (needs the `NPM_TOKEN` repo secret) and creates the GitHub release.
+- **CLI** (`cli/package.json`): publishing pushes `cli-vX.Y.Z`, and CI creates the GitHub release.
+  It isn't on npm: `install.sh` and `fshare update` install whatever is on `main`.
 - **App** (`mobile/app.json`): publishing builds the APK on your Mac, pushes `app-vX.Y.Z`, and creates
   the GitHub release with the APK attached. The Android `versionCode` is derived from the version
   (`major*10000 + minor*100 + patch`, so 1.2.3 → 10203) and always increases. To sign with your own

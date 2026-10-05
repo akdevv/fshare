@@ -48,9 +48,9 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
     {
       key: 'cable',
       title: 'Plug in',
-      body: 'Start fshare on your laptop, then connect your phone with a cable. They find each other.',
+      body: 'Run fshare on your laptop, then connect your phone with a cable. They find each other.',
       art: <CableArt />,
-      extra: <Command text="npx fshare-cli" />,
+      extra: <Command text="fshare" hint="First time? Install it from github.com/akdevv/fshare" />,
     },
     {
       key: 'wifi',
@@ -623,28 +623,31 @@ const styles2 = StyleSheet.create({
 });
 
 // The laptop command as a small pill; the round button copies it.
-function Command({ text }: { text: string }) {
+function Command({ text, hint }: { text: string; hint?: string }) {
   const [st, t] = useStyles(styles);
   const [copied, setCopied] = useState(false);
   return (
-    <View style={st.code}>
-      <Text style={st.codeText} selectable>
-        {text}
-      </Text>
-      <Press
-        style={[st.copy, copied && { backgroundColor: t.accentSoft }]}
-        onPress={async () => {
-          await Clipboard.setStringAsync(text);
-          haptic.success();
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1600);
-        }}
-        hitSlop={8}
-        accessibilityRole="button"
-        accessibilityLabel={copied ? 'Copied' : `${text}, copy`}
-      >
-        <Ionicons name={copied ? 'checkmark' : 'copy-outline'} size={12} color={copied ? t.onAccentSoft : t.faint} />
-      </Press>
+    <View style={{ gap: 8 }}>
+      <View style={st.code}>
+        <Text style={st.codeText} selectable>
+          {text}
+        </Text>
+        <Press
+          style={[st.copy, copied && { backgroundColor: t.accentSoft }]}
+          onPress={async () => {
+            await Clipboard.setStringAsync(text);
+            haptic.success();
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1600);
+          }}
+          hitSlop={8}
+          accessibilityRole="button"
+          accessibilityLabel={copied ? 'Copied' : `${text}, copy`}
+        >
+          <Ionicons name={copied ? 'checkmark' : 'copy-outline'} size={12} color={copied ? t.onAccentSoft : t.faint} />
+        </Press>
+      </View>
+      {hint && <Text style={st.hint}>{hint}</Text>}
     </View>
   );
 }
@@ -707,6 +710,7 @@ const styles = (t: Theme) =>
       borderColor: t.line,
     },
     codeText: { color: t.dim, fontSize: 12.5, fontFamily: mono },
+    hint: { color: t.faint, fontSize: 13, lineHeight: 18, fontFamily: font.medium },
     copy: { width: 24, height: 24, borderRadius: 12, backgroundColor: t.surface, alignItems: 'center', justifyContent: 'center' },
 
     // save-folder screen (Android)

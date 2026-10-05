@@ -115,7 +115,7 @@ export function safeDest(outDir: string, name: string, taken = new Set<string>()
 // History (finished files, notices) scrolls up; below it sits a live area redrawn in place:
 //   ● Galaxy S23 · USB cable                     <- who is connected
 //   ↓ clip.mp4  ━━━━━━━━━━━──────  62%  1.2 GB of 2.0 GB  34.1 MB/s  25s left
-//   › drop files here + Enter   q Wi-Fi QR · x cancel · ctrl+c quit
+//   › drop files here + Enter   o folder · q Wi-Fi QR · x cancel · ctrl+c quit
 const c = {
   dim: (s: string) => styleText("dim", s),
   bold: (s: string) => styleText("bold", s),
@@ -249,7 +249,7 @@ export class UI {
       this.confirm() ??
       (this.input
         ? `  ${c.cyan("›")} ${this.input.length > w - 6 ? "…" + this.input.slice(-(w - 7)) : this.input}`
-        : `  ${c.cyan("›")} ${c.dim("drop files here + Enter")}   ${c.dim("q")} ${c.dim("Wi-Fi QR ·")} ${c.dim("x")} ${c.dim("cancel ·")} ${c.dim("ctrl+c")} ${c.dim("quit")}`);
+        : `  ${c.cyan("›")} ${c.dim("drop files here + Enter")}   ${c.dim("o folder · q Wi-Fi QR · x cancel · ctrl+c quit")}`);
     const lines = ["", this.status(), this.progress(w), prompt].filter((l): l is string => l !== null).map((l) => clip(l, w - 1));
     process.stdout.write(lines.join("\n"));
     if (!this.input && !this.pending) process.stdout.write(`\r\x1b[4C`); // park the cursor right after "›"
@@ -266,7 +266,16 @@ export function computerName(): string {
   return os.hostname().replace(/\.local$/, "");
 }
 
-export function createServer(opts: { token: string; outDir: string; shared: Shared[]; ui?: UI; name?: string; partsDir?: string }) {
+export function createServer(opts: {
+  token: string;
+  outDir: string;
+  shared: Shared[];
+  ui?: UI;
+  name?: string;
+  partsDir?: string;
+  received?: (dest: string, from: string) => void; // a file from a phone was saved
+  control?: { key: string; send: (paths: string[]) => SendResult }; // `fshare send` from another terminal
+}) {
   const { token, outDir, shared } = opts;
   const partsDir = opts.partsDir ?? PARTS;
   const partOf = (id: string) => path.join(partsDir, id.replace(/[^\w-]/g, "").slice(0, 80) || "x");
@@ -297,10 +306,26 @@ export function createServer(opts: { token: string; outDir: string; shared: Shar
     const url = new URL(req.url!, "http://x");
     // USB pairing: only loopback can reach this, i.e. the phone through the adb cable tunnel
     // (or a process on this laptop). Wi-Fi clients must have scanned the QR instead.
+    const local = ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(req.socket.remoteAddress ?? "");
     if (url.pathname === "/pair") {
-      const local = ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(req.socket.remoteAddress ?? "");
       if (local) res.writeHead(200).end(token);
       else res.writeHead(403).end();
+      return;
+    }
+    // `fshare send` in another terminal on this computer. Loopback alone isn't enough (a phone on
+    // the USB cable arrives on loopback too), so it also needs the key from running.json.
+    if (url.pathname === "/control/send" && req.method === "POST" && opts.control) {
+      const key = req.headers["x-fshare-control"];
+      if (!local || typeof key !== "string" || !same(key, opts.control.key)) {
+        res.writeHead(403).end();
+        return;
+      }
+      try {
+        const { paths } = JSON.parse(Buffer.concat(await req.toArray()).toString());
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(opts.control.send(paths)));
+      } catch {
+        res.writeHead(400).end();
+      }
       return;
     }
     // signed with the token, or nothing: an app from before encryption gets told to update
@@ -446,6 +471,8 @@ export function createServer(opts: { token: string; outDir: string; shared: Shar
         res.writeHead(200).end("ok");
         untrack();
         ui.log(`  ${c.green("✓")} Received  ${home(dest)}  ${took(t0, size - offset)}`);
+        const who = req.headers["x-fshare-client"];
+        opts.received?.(dest, (typeof who === "string" && open(token, who)?.toString()) || "your phone");
       } catch {
         untrack();
         if (cancelled) {
@@ -471,6 +498,143 @@ function lanIp(): string {
     .filter((a) => a.family === "IPv4" && !a.internal);
   // prefer wifi/ethernet over VPN/docker bridges
   return (all.find((a) => /^(en|wl|eth)/.test(a.n)) ?? all[0])?.address ?? "127.0.0.1";
+}
+
+const same = (a: string, b: string) => a.length === b.length && crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
+
+export type SendResult = { files: number; size: number; to: string[]; missing: string[] };
+
+// Where `fshare send` finds the fshare that's running: its port and a key only this user can read.
+const CONFIG = path.join(os.homedir(), ".config", "fshare");
+const RUNNING = path.join(CONFIG, "running.json");
+
+// `fshare send <paths>`: hand them to the fshare already running, wherever it is. False when
+// there's none to hand them to (then this terminal starts one).
+async function sendToRunning(paths: string[]): Promise<boolean> {
+  let run: { port: number; key: string };
+  try {
+    run = JSON.parse(fs.readFileSync(RUNNING, "utf8"));
+  } catch {
+    return false;
+  }
+  let r: Response;
+  try {
+    r = await fetch(`http://127.0.0.1:${run.port}/control/send`, {
+      method: "POST",
+      headers: { "x-fshare-control": run.key },
+      body: JSON.stringify({ paths }),
+      signal: AbortSignal.timeout(3000),
+    });
+  } catch {
+    return false; // left over from an fshare that didn't quit cleanly
+  }
+  if (!r.ok) return false;
+  const res: SendResult = await r.json();
+  for (const m of res.missing) console.log(`  ${c.red("!")} ${path.relative(process.cwd(), m) || m}: not found`);
+  if (!res.files) {
+    if (!res.missing.length) console.log(c.dim("  Nothing to send (empty folder)"));
+    process.exitCode = 1;
+    return true;
+  }
+  const to = res.to.length ? res.to.join(" and ") : "your phone when it connects";
+  console.log(
+    `  ${c.cyan("↓")} Sending ${c.bold(`${res.files} file${res.files === 1 ? "" : "s"}`)} ${c.dim(`· ${fmt(res.size)}`)} to ${c.bold(to)}`,
+  );
+  console.log(c.dim("    Progress shows in the fshare window."));
+  return true;
+}
+
+// open a folder in Finder / Explorer / the file manager
+function reveal(dir: string) {
+  fs.mkdirSync(dir, { recursive: true });
+  const cmd = { darwin: "open", win32: "explorer" }[process.platform as string] ?? "xdg-open";
+  execFile(cmd, [dir], () => {});
+}
+
+// "Received 3 files" from "Galaxy S23": a system notification, sent a moment after the last of a
+// batch lands, so a folder of 200 photos is one notification, not 200.
+export function batchNotify(notify: (title: string, body: string) => void, wait = 1500) {
+  let names: string[] = [],
+    from = "",
+    timer: NodeJS.Timeout | undefined;
+  return (dest: string, who: string) => {
+    names.push(path.basename(dest));
+    from = who;
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      notify(names.length === 1 ? `Received ${names[0]}` : `Received ${names.length} files`, `From ${from}`);
+      names = [];
+    }, wait);
+  };
+}
+
+function desktopNotify(title: string, body: string) {
+  if (process.platform === "darwin")
+    execFile("osascript", ["-e", `display notification ${JSON.stringify(body)} with title ${JSON.stringify(title)}`], () => {});
+  else if (process.platform === "linux") execFile("notify-send", [title, body], () => {});
+}
+
+// Installed with install.sh: a git clone in ~/.fshare (or $FSHARE_HOME), built in place.
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const CLI_DIR = [HERE, path.dirname(HERE)].find((d) => fs.existsSync(path.join(d, "package.json"))) ?? HERE;
+const INSTALL_HOME = path.resolve(process.env.FSHARE_HOME ?? path.join(os.homedir(), ".fshare"));
+const INSTALL = "curl -fsSL https://raw.githubusercontent.com/akdevv/fshare/main/install.sh | sh";
+
+// the copy that's running is the installed one (not a development checkout)
+function installed(): string | null {
+  const root = path.dirname(CLI_DIR);
+  const real = (p: string) => {
+    try {
+      return fs.realpathSync(p);
+    } catch {
+      return p;
+    }
+  };
+  if (real(root) === real(INSTALL_HOME) && fs.existsSync(path.join(root, ".git"))) return root;
+  console.log(`  ${c.yellow("!")} This fshare is at ${home(root)}, not installed with install.sh.`);
+  console.log(c.dim(`    Install it with: ${INSTALL}`));
+  process.exitCode = 1;
+  return null;
+}
+
+function update() {
+  const root = installed();
+  if (!root) return;
+  const was = PKG_VERSION;
+  try {
+    console.log(c.dim("  Getting the latest from GitHub…"));
+    // same as install.sh: the latest main, whatever state this copy is in
+    execFileSync("git", ["-C", root, "fetch", "--quiet", "--depth", "1", "origin", "main"], { stdio: "inherit" });
+    execFileSync("git", ["-C", root, "checkout", "--quiet", "--force", "FETCH_HEAD"], { stdio: "inherit" });
+    execFileSync("npm", ["ci", "--prefix", CLI_DIR, "--no-audit", "--no-fund", "--loglevel=error"], {
+      stdio: ["ignore", "ignore", "inherit"],
+    });
+  } catch {
+    console.log(`  ${c.red("✗")} Update failed. To start over: ${c.bold(`rm -rf ${home(root)} && ${INSTALL}`)}`);
+    process.exitCode = 1;
+    return;
+  }
+  const now = JSON.parse(fs.readFileSync(path.join(CLI_DIR, "package.json"), "utf8")).version;
+  console.log(
+    now === was
+      ? `  ${c.green("✓")} Already up to date ${c.dim(`(v${now})`)}`
+      : `  ${c.green("✓")} Updated ${c.dim(`v${was} →`)} ${c.bold(`v${now}`)}`,
+  );
+}
+
+function uninstall() {
+  const root = installed();
+  if (!root) return;
+  for (const dir of [process.env.FSHARE_BIN, "/usr/local/bin", path.join(os.homedir(), ".local", "bin"), "/opt/homebrew/bin"]) {
+    if (!dir) continue;
+    const link = path.join(dir, "fshare");
+    try {
+      if (fs.lstatSync(link).isSymbolicLink() && fs.realpathSync(link).startsWith(root + path.sep)) fs.rmSync(link);
+    } catch {}
+  }
+  fs.rmSync(root, { recursive: true, force: true });
+  console.log(`  ${c.green("✓")} fshare is uninstalled`);
+  console.log(c.dim(`    Your pairing is still in ${home(CONFIG)}; delete that folder too to forget your phones.`));
 }
 
 // Pairing token persists across runs, so a phone that scanned once can reconnect (e.g. over USB) without scanning.
@@ -794,26 +958,46 @@ export async function tunnel(d: any, port: number) {
 
 async function main() {
   const args = process.argv.slice(2);
-  if (args.includes("-h") || args.includes("--help")) {
+  if (args[0] === "help" || args.includes("-h") || args.includes("--help")) {
+    const k = (s: string) => c.bold(s.padEnd(22));
     console.log(`
   ${c.lime("fshare")} ${c.dim(`v${PKG_VERSION}`)}  fast file transfer between this computer and your phone
 
-  ${c.bold("Usage")}   fshare [files or folders…] [options]
+  ${c.bold("Commands")}
+    ${k("fshare [files…]")}start, and send these to your phone
+    ${k("fshare send <files…>")}send from any terminal (starts fshare if it isn't running)
+    ${k("fshare update")}get the latest version from GitHub
+    ${k("fshare uninstall")}remove fshare from this computer
 
-  ${c.bold("Connect")} USB: plug in an Android phone (USB debugging on) and open the app
-          Wi-Fi: press ${c.bold("q")}, then scan the QR code in the app
+  ${c.bold("Connect")}
+    USB     plug in an Android phone and open the app
+    Wi-Fi   press ${c.bold("q")}, then scan the QR code in the app
 
-  ${c.bold("While running")}
-          drop files or folders into the terminal + Enter   send them to the phone (asks first)
-          ${c.bold("q")}   show the Wi-Fi QR code
-          ${c.bold("x")}   cancel all transfers (partial files are deleted)
+  ${c.bold("While it runs")}
+    drop files or folders + Enter   send them (asks first)
+    ${c.bold("o")}   open the folder received files go to
+    ${c.bold("q")}   show the Wi-Fi QR code
+    ${c.bold("x")}   cancel all transfers (partial files are deleted)
 
   ${c.bold("Options")}
-          -o <dir>     where received files go (default ~/Downloads)
-          -p <port>    port to listen on (default 4747)
-          --new-pair   forget paired phones (they scan the QR again)
+    -o <dir>     where received files go (default ~/Downloads)
+    -p <port>    port to listen on (default 4747)
+    --new-pair   forget paired phones (they scan the QR again)
 `);
     return;
+  }
+  if (args[0] === "update") return update();
+  if (args[0] === "uninstall") return uninstall();
+  if (args[0] === "send") {
+    args.shift();
+    if (!args.length) {
+      console.log(`  Usage: ${c.bold("fshare send <files or folders…>")}`);
+      process.exitCode = 1;
+      return;
+    }
+    const abs = args.map((p) => path.resolve(p.replace(/^~(?=$|\/)/, os.homedir())));
+    if (await sendToRunning(abs)) return;
+    console.log(c.dim("  fshare isn't running here yet; starting it."));
   }
   const flag = (f: string) => {
     const i = args.indexOf(f);
@@ -827,21 +1011,28 @@ async function main() {
   let nextId = 0; // ids stay unique when files are removed from the list
   const ui = new UI();
   // Shared files are pushed: every connected phone downloads them by itself.
-  const expandAll = (paths: string[]) =>
+  const expandAll = (paths: string[], missing: string[] = []) =>
     paths.flatMap((p) => {
       try {
         return [{ p, files: expand(p) }];
       } catch (e: any) {
         ui.log(`  ${c.red("!")} ${p}: ${e.code === "ENOENT" ? "not found" : (e.code ?? e.message)}`);
+        missing.push(p);
         return [];
       }
     });
-  const add = (paths: string[]) => {
-    for (const { p, files } of expandAll(paths)) {
+  const add = (paths: string[]): SendResult => {
+    const res: SendResult = { files: 0, size: 0, to: [...new Set([...ui.clients.values()].map((x) => x.name))], missing: [] };
+    for (const { p, files } of expandAll(paths, res.missing)) {
       for (const f of files) shared.push({ id: nextId++, path: f.rel, size: f.size, abs: f.abs });
-      const size = fmt(files.reduce((s, f) => s + f.size, 0));
-      ui.log(`  ${c.cyan("↓")} Sending   ${path.basename(p)}  ${c.dim(`${files.length} file${files.length === 1 ? "" : "s"} · ${size}`)}`);
+      const size = files.reduce((s, f) => s + f.size, 0);
+      res.files += files.length;
+      res.size += size;
+      ui.log(
+        `  ${c.cyan("↓")} Sending   ${path.basename(p)}  ${c.dim(`${files.length} file${files.length === 1 ? "" : "s"} · ${fmt(size)}`)}`,
+      );
     }
+    return res;
   };
   // dropped into the terminal: ask first, since a drop is easy to do by accident
   const stage = (paths: string[]) => {
@@ -866,7 +1057,8 @@ async function main() {
   fs.rmSync(PARTS, { recursive: true, force: true }); // parts from an earlier session can't be resumed
   const token = pairToken(args.includes("--new-pair"));
   if (args.includes("--new-pair")) args.splice(args.indexOf("--new-pair"), 1);
-  const server = createServer({ token, outDir, shared, ui });
+  const control = crypto.randomBytes(16).toString("hex");
+  const server = createServer({ token, outDir, shared, ui, received: batchNotify(desktopNotify), control: { key: control, send: add } });
   server.on("connection", (s) => s.setNoDelay(true));
   server.listen(port, "0.0.0.0", () => {
     const at = (server.address() as any).port;
@@ -877,6 +1069,15 @@ async function main() {
     row("Wi-Fi", `${lanIp()}:${at} ${c.dim("· press q for the QR code")}`);
     row("USB", c.dim("plug in an Android phone and open the app"));
     console.log();
+    // where `fshare send` in another terminal finds this one
+    fs.mkdirSync(CONFIG, { recursive: true });
+    fs.writeFileSync(RUNNING, JSON.stringify({ port: at, key: control, pid: process.pid }), { mode: 0o600 });
+    process.on("exit", () => {
+      try {
+        if (JSON.parse(fs.readFileSync(RUNNING, "utf8")).pid === process.pid) fs.rmSync(RUNNING);
+      } catch {}
+    });
+    for (const sig of ["SIGTERM", "SIGHUP"] as const) process.on(sig, () => process.exit(0)); // terminal closed: clean up too
     add(args);
     ui.redraw();
     const adbReady = new Set<string>();
@@ -894,6 +1095,10 @@ async function main() {
       qrcode.generate(wifiUrl, { small: true }, (q: string) =>
         ui.log(`\n${q.replace(/^/gm, "  ")}  ${c.dim("Scan in the app (Use Wi-Fi instead) or open")} ${wifiUrl}\n`),
       ),
+    o: () => {
+      reveal(outDir);
+      ui.log(c.dim(`  Opened ${home(outDir)}`));
+    },
     x: () => {
       if (!ui.active.size) ui.log(c.dim("  Nothing to cancel"));
       for (const a of ui.active) a.cancel();

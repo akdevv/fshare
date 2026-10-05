@@ -25,7 +25,8 @@ test('onboarding walks through every step, then finishes', async () => {
   expect(screen.getByText('Send files between your phone and laptop')).toBeTruthy();
   await fireEvent.press(screen.getByLabelText('Next'));
   expect(screen.getByText('Plug in')).toBeTruthy();
-  expect(screen.getByText('npx fshare-cli')).toBeTruthy();
+  expect(screen.getByText('fshare')).toBeTruthy();
+  expect(screen.getByText(/github.com\/akdevv\/fshare/)).toBeTruthy();
   await fireEvent.press(screen.getByLabelText('Next'));
   expect(screen.getByText('No cable? Use Wi-Fi')).toBeTruthy();
   await fireEvent.press(screen.getByLabelText('Get started')); // iOS: no save-folder step

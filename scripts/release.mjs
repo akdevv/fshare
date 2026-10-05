@@ -4,7 +4,7 @@
 //   1. npm run release -- <cli|app> <patch|minor|major|x.y.z>
 //      bumps the version on a release/<what>-v<x.y.z> branch and opens a PR. CI checks it.
 //   2. after merging: npm run release:publish -- <cli|app>   (on an up-to-date main)
-//      cli: pushes tag cli-v<x.y.z>; CI publishes fshare-cli to npm and makes the GitHub release.
+//      cli: pushes tag cli-v<x.y.z>; CI tests it and makes the GitHub release (install.sh installs from GitHub).
 //      app: builds the APK on this Mac, pushes tag app-v<x.y.z>, and makes the GitHub release with the APK.
 //
 // Versions are semver. The APK's versionCode is derived: major*10000 + minor*100 + patch, so it
@@ -83,7 +83,7 @@ function publish(what) {
   if (what === 'app') {
     live('gh', 'release', 'create', tag, `dist/fshare-${version}.apk`, '--title', `App ${version}`, '--generate-notes');
   } else {
-    console.log(`Pushed ${tag}: CI publishes fshare-cli@${version} and creates the GitHub release.`);
+    console.log(`Pushed ${tag}: CI tests it and creates the GitHub release.`);
   }
 }
 

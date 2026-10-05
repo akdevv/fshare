@@ -24,10 +24,17 @@ assert.deepEqual(
 );
 
 const shared = files.map((f, id) => ({ id, path: f.rel, size: f.size, abs: f.abs }));
-const server = createServer({ token: "tok", outDir: out, shared, name: "Test Mac", partsDir: path.join(tmp, "parts") }).listen(
-  0,
-  "0.0.0.0",
-);
+const sent: string[][] = [];
+const saved: [string, string][] = [];
+const server = createServer({
+  token: "tok",
+  outDir: out,
+  shared,
+  name: "Test Mac",
+  partsDir: path.join(tmp, "parts"),
+  received: (dest, from) => saved.push([path.relative(out, dest), from]),
+  control: { key: "ctl", send: (paths) => (sent.push(paths), { files: 1, size: 3, to: [], missing: [] }) },
+}).listen(0, "0.0.0.0");
 await new Promise((r) => server.once("listening", r));
 const base = `http://127.0.0.1:${(server.address() as any).port}`;
 
@@ -88,6 +95,19 @@ assert.ok(etag && part.headers.get("last-modified"));
 assert.equal((await fetch(u("/file/0"), { headers: { range: "bytes=10-", "if-range": etag } })).status, 206);
 assert.equal((await fetch(u("/file/0"), { headers: { range: "bytes=10-", "if-range": '"stale"' } })).status, 200);
 
+// `fshare send` from another terminal: loopback and the key, nothing else
+const ctl = (key?: string, host = "127.0.0.1") =>
+  fetch(`http://${host}:${(server.address() as any).port}/control/send`, {
+    method: "POST",
+    headers: key ? { "x-fshare-control": key } : {},
+    body: JSON.stringify({ paths: ["/a", "/b"] }),
+  });
+assert.equal((await ctl()).status, 403);
+assert.equal((await ctl("wrong")).status, 403);
+if (lan) assert.equal((await ctl("ctl", lan)).status, 403); // right key, but not from this computer
+assert.deepEqual(await (await ctl("ctl")).json(), { files: 1, size: 3, to: [], missing: [] });
+assert.deepEqual(sent, [["/a", "/b"]]);
+
 // the opener refuses anything cut short, tampered with, or sealed with another key
 await assert.rejects(unseal(wire.subarray(0, wire.length - 65552)));
 const bent = Buffer.from(wire);
@@ -123,6 +143,7 @@ assert.equal(received, 1_000_000);
 assert.ok(!fs.existsSync(path.join(out, "pics/resume.bin")));
 assert.equal((await fetch(q(received), { method: "PUT", body: blob.subarray(received) })).status, 200);
 assert.ok(fs.readFileSync(path.join(out, "pics/resume.bin")).equals(fs.readFileSync(path.join(tmp, "blob"))));
+assert.deepEqual(saved, [["pics/resume.bin", "your phone"]]); // no x-fshare-client header in this test
 // a replay of the finished upload isn't saved twice
 assert.equal((await fetch(q(0), { method: "PUT", body: blob })).status, 200);
 assert.ok(!fs.existsSync(path.join(out, "pics/resume (1).bin")));
