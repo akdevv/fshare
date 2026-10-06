@@ -16,9 +16,7 @@
         },
         "UIFileSharingEnabled": true,
         "LSSupportsOpeningDocumentsInPlace": true,
-        "NSBonjourServices": [
-          "_fshare._tcp"
-        ]
+        "NSBonjourServices": ["_fshare._tcp"]
       },
       "buildNumber": "10010"
     },
@@ -57,12 +55,8 @@
         {
           "android": {
             "enabled": true,
-            "singleShareMimeTypes": [
-              "*/*"
-            ],
-            "multipleShareMimeTypes": [
-              "*/*"
-            ]
+            "singleShareMimeTypes": ["*/*"],
+            "multipleShareMimeTypes": ["*/*"]
           }
         }
       ],
