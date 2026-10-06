@@ -2,7 +2,7 @@ import Foundation
 
 // Finds other phones running fshare on the same Wi-Fi or hotspot (Bonjour). The server announces
 // this phone itself (PeerServer's NWListener service).
-// ponytail: NetService is deprecated but still the simplest way to get an IP and the TXT record.
+// NetService is deprecated, but it's still the simplest way to get an address and the TXT record.
 final class Nearby: NSObject, NetServiceBrowserDelegate, NetServiceDelegate {
   private let emit: Emit
   private let browser = NetServiceBrowser()

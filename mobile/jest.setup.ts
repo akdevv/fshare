@@ -20,7 +20,7 @@ jest.mock('react-native-reanimated', () => ({
 
 require('react-native-gesture-handler/jestSetup');
 
-jest.mock('./prefs', () => {
+jest.mock('./src/lib/prefs', () => {
   let prefs = {};
   return {
     readPrefs: () => prefs,

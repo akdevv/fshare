@@ -2,7 +2,7 @@ import { createContext, use, useMemo, useState, type ReactNode } from 'react';
 import { useColorScheme } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import type { Ionicons } from '@expo/vector-icons';
-import { readPrefs, writePrefs } from './prefs';
+import { readPrefs, writePrefs } from './lib/prefs';
 
 // Material 3-style tonal palette: an accent, a soft "container" version of it, and stepped surfaces.
 export type Theme = {
@@ -129,7 +129,8 @@ export function fileIcon(name: string): keyof typeof Ionicons.glyphMap {
   return 'document-outline';
 }
 
-// Plus Jakarta Sans, loaded in App, for onboarding and the choose-folder screen; the rest of the app uses the system font. Custom fonts ignore fontWeight on Android, so each weight is its own family.
+// Plus Jakarta Sans for onboarding and the choose-folder screen; the rest uses the system font.
+// Custom fonts ignore fontWeight on Android, so each weight is its own family.
 export const font = {
   medium: 'PlusJakartaSans_500Medium',
   semibold: 'PlusJakartaSans_600SemiBold',

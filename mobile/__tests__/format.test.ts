@@ -1,6 +1,6 @@
-import { eta, fileIcon, fmt, rate } from '../theme';
-import { summary } from '../session';
-import { mimeOf } from '../open';
+import { eta, fileIcon, fmt, rate } from '../src/theme';
+import { summary } from '../src/hooks/use-transfers';
+import { mimeOf } from '../src/lib/open';
 
 test('sizes read naturally', () => {
   expect(fmt(512)).toBe('1 KB');

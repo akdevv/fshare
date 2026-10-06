@@ -16,7 +16,7 @@ fi
 [ -n "$JAVA_HOME" ] || { echo "JDK 17 not found (set JAVA_HOME)" >&2; exit 1; }
 
 VERSION=$(node -p 'require("./mobile/app.json").expo.version')
-# ponytail: arm64 only (every phone from the last ~8 years); add armeabi-v7a,x86_64 if someone needs them
+# arm64 only (every phone from the last ~8 years); add armeabi-v7a,x86_64 if someone needs them
 ABIS="${ABIS:-arm64-v8a}"
 
 (cd mobile && CI=1 npx expo prebuild -p android --no-install > /dev/null)

@@ -1,12 +1,11 @@
-// The rows under Appearance in Settings: this phone's name, notifications, and keeping
-// transfers going while minimized. Each saves to prefs as soon as it changes.
+// Settings for this phone. Each saves as soon as it changes.
 import { useRef, useState } from 'react';
 import { StyleSheet, Text, TextInput, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { haptic, useStyles, type Theme } from './theme';
+import { haptic, useStyles, type Theme } from '../theme';
 import { Press, Toggle } from './ui';
-import { me, rename } from './identity';
-import { readPrefs, writePrefs } from './prefs';
+import { me, rename } from '../lib/identity';
+import { readPrefs, writePrefs } from '../lib/prefs';
 
 export function Preferences({ onKeepAlive }: { onKeepAlive: (on: boolean) => void }) {
   const [st, t] = useStyles(styles);

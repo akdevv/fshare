@@ -17,7 +17,7 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated';
 import { scheduleOnRN } from 'react-native-worklets';
-import { useTheme } from './theme';
+import { useTheme } from '../theme';
 
 SplashScreen.preventAutoHideAsync().catch(() => {});
 
@@ -94,9 +94,9 @@ export function Splash() {
   return (
     <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, styles.center, { backgroundColor: t.bg }, backdrop]}>
       <View style={styles.box}>
-        <Animated.Image source={require('./assets/splash-cookie.png')} style={[styles.layer, cookie]} />
-        <Animated.Image source={require('./assets/splash-up.png')} style={[styles.layer, up]} />
-        <Animated.Image source={require('./assets/splash-down.png')} style={[styles.layer, down]} />
+        <Animated.Image source={require('../../assets/splash-cookie.png')} style={[styles.layer, cookie]} />
+        <Animated.Image source={require('../../assets/splash-up.png')} style={[styles.layer, up]} />
+        <Animated.Image source={require('../../assets/splash-down.png')} style={[styles.layer, down]} />
       </View>
     </Animated.View>
   );

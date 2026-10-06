@@ -40,7 +40,7 @@ public class FsharePeerModule: Module {
       }
     }
 
-    // end-to-end encryption (Seal.swift): the app signs its requests and seals/opens what it sends
+    // end-to-end encryption, see Seal.swift
     Function("sign") { (token: String, msg: String) in Seal.sign(token, msg) }
     Function("seal") { (token: String, text: String) in Seal.seal(token, Data(text.utf8)) }
     Function("open") { (token: String, sealed: String) -> String? in Seal.openText(token, sealed) }

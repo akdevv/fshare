@@ -1,6 +1,6 @@
 // The app's signed requests and sealed replies, checked against the laptop's implementation of
 // the spec (cli/seal.ts) standing in for the native module.
-import { client, me, openList, signed } from '../identity';
+import { client, me, openList, signed } from '../src/lib/identity';
 
 const laptop: typeof import('../../cli/seal') = jest.requireActual('../../cli/seal.ts');
 

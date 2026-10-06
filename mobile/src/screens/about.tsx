@@ -1,18 +1,19 @@
 import { useEffect, useState } from 'react';
 import { BackHandler, Image, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import Animated, { Easing, FadeInDown, ReduceMotion, SlideInRight, SlideOutRight } from 'react-native-reanimated';
+import Animated from 'react-native-reanimated';
 import Constants from 'expo-constants';
 import { StatusBar } from 'expo-status-bar';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { font, haptic, useStyles, type Theme } from './theme';
-import { getSaveDir, label } from './downloads';
-import { myName } from './modules/fshare-peer';
+import { font, haptic, useStyles, type Theme } from '../theme';
+import { getSaveDir, label } from '../lib/downloads';
+import { Pushed, rise } from '../components/motion';
+import { me } from '../lib/identity';
 
 type Props = {
   open: boolean;
   onClose: () => void;
-  laptop: string;
+  name: string;
   usb: boolean;
   host: string;
   outdated: boolean;
@@ -24,40 +25,30 @@ type Row = { icon: Icon; k: string; v: string; addr?: boolean; path?: boolean; w
 
 const BAR = 52;
 
-// Full-screen About: the app, who you're connected to, and this phone. Nothing else.
-// A layer in the app's own window (not a Modal), so it's edge to edge with the right insets on
-// Android too; slides in from the right like a pushed screen, and Back closes it.
-export function About(props: Props) {
-  if (!props.open) return null;
+// The app, who you're connected to, and this phone. A layer in the app's own window rather than a
+// Modal, so it's edge to edge with the right insets on Android too.
+export function About({ open, ...props }: Props) {
   return (
-    <Animated.View
-      entering={SlideInRight.duration(340)
-        .easing(Easing.bezier(0.32, 0.72, 0, 1))
-        .reduceMotion(ReduceMotion.System)}
-      exiting={SlideOutRight.duration(260)
-        .easing(Easing.bezier(0.32, 0.72, 0, 1))
-        .reduceMotion(ReduceMotion.System)}
-      style={StyleSheet.absoluteFill}
-    >
+    <Pushed open={open}>
       <Page {...props} />
-    </Animated.View>
+    </Pushed>
   );
 }
 
-function Page({ onClose, laptop, usb, host, outdated, kind }: Props) {
+function Page({ onClose, name, usb, host, outdated, kind }: Omit<Props, 'open'>) {
   const [s, t] = useStyles(styles);
   const insets = useSafeAreaInsets();
   const [scrolled, setScrolled] = useState(false);
   const version = Constants.expoConfig?.version ?? '1.0.0';
   const build = Platform.OS === 'ios' ? Constants.expoConfig?.ios?.buildNumber : Constants.expoConfig?.android?.versionCode;
   const connection: Row[] = [
-    { icon: kind === 'laptop' ? 'laptop-outline' : 'phone-portrait-outline', k: kind === 'laptop' ? 'Laptop' : 'Phone', v: laptop },
+    { icon: kind === 'laptop' ? 'laptop-outline' : 'phone-portrait-outline', k: kind === 'laptop' ? 'Laptop' : 'Phone', v: name },
     { icon: usb ? 'flash-outline' : 'wifi-outline', k: 'Connection', v: usb ? 'USB cable' : 'Wi-Fi' },
     ...(usb ? [] : [{ icon: 'globe-outline' as Icon, k: 'Address', v: host.replace(/^http:\/\//, ''), addr: true }]),
     ...(outdated ? [{ icon: 'refresh-outline' as Icon, k: 'Laptop app', v: 'Update fshare to connect', warn: true }] : []),
   ];
   const phone: Row[] = [
-    { icon: 'phone-portrait-outline', k: 'Name', v: myName },
+    { icon: 'phone-portrait-outline', k: 'Name', v: me.name },
     { icon: 'folder-outline', k: 'Saves to', v: Platform.OS === 'ios' ? 'Files/fshare' : label(getSaveDir()), path: true },
   ];
   const close = () => {
@@ -73,7 +64,7 @@ function Page({ onClose, laptop, usb, host, outdated, kind }: Props) {
   }, [onClose]);
 
   const group = (title: string, rows: Row[], i: number) => (
-    <Animated.View entering={rise(i)} style={{ gap: 8 }}>
+    <Animated.View entering={rise(60 + i * 60, 8, 400)} style={{ gap: 8 }}>
       <Text style={s.label}>{title}</Text>
       <View style={s.group}>
         {rows.map((r, j) => (
@@ -124,8 +115,8 @@ function Page({ onClose, laptop, usb, host, outdated, kind }: Props) {
         scrollEventThrottle={32}
         onScroll={(e) => setScrolled(e.nativeEvent.contentOffset.y > 4)}
       >
-        <Animated.View entering={rise(0)} style={s.hero}>
-          <Image source={require('./assets/icon.png')} style={s.appIcon} accessibilityIgnoresInvertColors />
+        <Animated.View entering={rise(60, 8, 400)} style={s.hero}>
+          <Image source={require('../../assets/icon.png')} style={s.appIcon} accessibilityIgnoresInvertColors />
           <Text style={s.name}>fshare</Text>
           <View style={s.version}>
             <Text style={s.versionText}>
@@ -162,13 +153,6 @@ function Page({ onClose, laptop, usb, host, outdated, kind }: Props) {
     </View>
   );
 }
-
-const rise = (i: number) =>
-  FadeInDown.delay(60 + i * 60)
-    .duration(400)
-    .easing(Easing.bezier(0.23, 1, 0.32, 1))
-    .withInitialValues({ transform: [{ translateY: 8 }] })
-    .reduceMotion(ReduceMotion.System);
 
 const styles = (t: Theme) =>
   StyleSheet.create({

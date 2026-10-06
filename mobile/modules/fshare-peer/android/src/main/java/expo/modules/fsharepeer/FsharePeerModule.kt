@@ -39,8 +39,7 @@ class FsharePeerModule : Module() {
       tunnel = UsbTunnel(context, CABLE_PORT, SERVER_PORT, emit).also { it.start() }
     }
 
-    // re-announce with the new hidden flag; NSD can't change a registered service's attributes
-    // renamed in Settings: re-announce under the new name, and answer /list with it
+    // NSD can't change a registered service, so both of these announce it again
     Function("setName") { name: String ->
       val (_, id, visible) = me ?: return@Function
       me = Triple(name, id, visible)
@@ -60,7 +59,7 @@ class FsharePeerModule : Module() {
       if (on) TransferService.show(context, title, text, progress) else TransferService.hide(context)
     }
 
-    // end-to-end encryption (Seal.kt): the app signs its requests and seals/opens what it sends
+    // end-to-end encryption, see Seal.kt
     Function("sign") { token: String, msg: String -> Seal.sign(token, msg) }
     Function("seal") { token: String, text: String -> Seal.seal(token, text.toByteArray()) }
     Function("open") { token: String, sealed: String -> Seal.openText(token, sealed) }
