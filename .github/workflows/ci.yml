@@ -1,12 +1,12 @@
-# Runs on every pull request and every push to main. Branch protection on main requires these
-# jobs to pass before a PR can merge. The APK isn't built here (10+ minutes per run); build it
-# on your Mac with `npm run apk` (see README).
+# Runs once per pull request. Not again on merge: branch protection only lets a PR into main when
+# it's up to date with main and these jobs passed, so main is exactly what was just tested.
+# (Run it by hand from the Actions tab if ever needed.) The APK isn't built here (10+ minutes per
+# run); build it on your Mac with `npm run apk` (see README).
 name: CI
 
 on:
   pull_request:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}

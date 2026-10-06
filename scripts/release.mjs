@@ -81,7 +81,9 @@ function publish(what) {
   live('git', 'tag', '-a', tag, '-m', `${what} v${version}`);
   live('git', 'push', 'origin', tag);
   if (what === 'app') {
-    live('gh', 'release', 'create', tag, `dist/fshare-${version}.apk`, '--title', `App ${version}`, '--generate-notes');
+    // uploaded as fshare.apk, so releases/latest/download/fshare.apk (the README's link) is always the newest
+    fs.copyFileSync(`dist/fshare-${version}.apk`, 'dist/fshare.apk');
+    live('gh', 'release', 'create', tag, 'dist/fshare.apk', '--title', `fshare ${version}`, '--generate-notes', '--latest');
   } else {
     console.log(`Pushed ${tag}: CI tests it and creates the GitHub release.`);
   }

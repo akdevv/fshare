@@ -50,6 +50,7 @@
     "doctor": "expo-doctor"
   },
   "private": true,
+  "license": "MIT",
   "jest": {
     "preset": "jest-expo",
     "setupFiles": [
