@@ -58,7 +58,15 @@ function prepare(what, part) {
     app.expo.android.versionCode = versionCode(next);
     app.expo.ios.buildNumber = String(versionCode(next));
     writeJson('mobile/app.json', app);
+    const pkg = readJson('mobile/package.json');
+    pkg.version = next;
+    writeJson('mobile/package.json', pkg);
+    const lock = readJson('mobile/package-lock.json');
+    lock.version = next;
+    lock.packages[''].version = next;
+    writeJson('mobile/package-lock.json', lock);
   }
+  live('npx', 'prettier', '--write', '--log-level=warn', what === 'cli' ? 'cli/package*.json' : 'mobile/{app,package,package-lock}.json');
   live('git', 'commit', '-am', `release: ${what} v${next}`);
   live('git', 'push', '-u', 'origin', branch);
   live(
