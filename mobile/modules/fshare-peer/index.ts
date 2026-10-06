@@ -26,6 +26,7 @@ type PeerModule = {
   deviceName(): string | null; // null on iOS: expo-constants has it
   start(token: string, name: string, id: string, visible: boolean): void;
   setVisible(visible: boolean): void;
+  setName(name: string): void; // renamed in Settings: announce and answer with the new name
   // keep running while minimized (Android: foreground service + ongoing notification; iOS: background task)
   background(on: boolean, title: string, text: string, progress: number): void;
   answerPair(id: string, ok: boolean): void;
@@ -33,8 +34,9 @@ type PeerModule = {
   sign(token: string, msg: string): string;
   seal(token: string, text: string): string;
   open(token: string, sealed: string): string | null;
-  sealFile(token: string, src: string, dst: string, seed: string): Promise<number>; // sealed size
-  openFile(token: string, src: string, dst: string): Promise<number>; // rejects if it doesn't open
+  // src: a file:// or (Android) content:// URI; name: its real file name, when the system says
+  sealFile(token: string, src: string, dst: string, seed: string): Promise<{ size: number; name: string | null }>;
+  openFile(token: string, src: string, dst: string): Promise<number>; // dst can be in the save folder; rejects if it doesn't open
   pairStart(): string; // our public key
   pairFinish(theirPub: string): { secret: string; code: string };
   cancel(id: string): void;

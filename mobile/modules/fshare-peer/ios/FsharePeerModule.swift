@@ -28,6 +28,7 @@ public class FsharePeerModule: Module {
     }
 
     Function("setVisible") { (visible: Bool) in self.server?.setVisible(visible) }
+    Function("setName") { (name: String) in self.server?.setName(name) }
     // iOS has no long-running service: while files move, ask for background time (a few minutes at most)
     Function("background") { (on: Bool, _: String, _: String, _: Int) in
       DispatchQueue.main.async {
@@ -43,10 +44,10 @@ public class FsharePeerModule: Module {
     Function("sign") { (token: String, msg: String) in Seal.sign(token, msg) }
     Function("seal") { (token: String, text: String) in Seal.seal(token, Data(text.utf8)) }
     Function("open") { (token: String, sealed: String) -> String? in Seal.openText(token, sealed) }
-    AsyncFunction("sealFile") { (token: String, src: URL, dst: URL, seed: String) -> Double in
+    AsyncFunction("sealFile") { (token: String, src: URL, dst: URL, seed: String) -> [String: Any] in
       try Seal.sealFile(token, from: src, to: dst, seed: seed)
       let size = (try FileManager.default.attributesOfItem(atPath: src.path)[.size] as? NSNumber)?.int64Value ?? 0
-      return Double(Seal.sealedSize(size))
+      return ["size": Double(Seal.sealedSize(size)), "name": src.lastPathComponent]
     }
     AsyncFunction("openFile") { (token: String, src: URL, dst: URL) -> Double in
       do {

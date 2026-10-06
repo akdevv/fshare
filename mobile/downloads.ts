@@ -40,9 +40,9 @@ export function label(dir: Directory | null) {
     .replace(/^primary:/, '');
 }
 
-// Move a finished download from cache into the save folder, recreating "a/b/file.ext".
-// Never overwrites: picks "file (1).ext" if the name is taken. Returns the saved file.
-export async function saveInto(root: Directory, tmp: File, relPath: string): Promise<File> {
+// An empty file at "a/b/file.ext" in the save folder, for a received file to be opened straight
+// into. Never overwrites: picks "file (1).ext" if the name is taken.
+export function placeFor(root: Directory, relPath: string): File {
   const parts = relPath.split('/').filter((p) => p && p !== '..');
   const fileName = parts.pop()!;
   let dir = root;
@@ -55,7 +55,7 @@ export async function saveInto(root: Directory, tmp: File, relPath: string): Pro
   const [stem, ext] = dot > 0 ? [fileName.slice(0, dot), fileName.slice(dot)] : [fileName, ''];
   let name = fileName;
   for (let i = 1; taken.has(name); i++) name = `${stem} (${i})${ext}`;
-  if (tmp.name !== name) tmp.rename(name);
-  await tmp.move(dir); // Android: streams into the SAF folder; iOS: a plain rename
-  return tmp;
+  // octet-stream: Android keeps the name exactly as given (with text/plain it would add ".txt");
+  // the media scanner still goes by the extension
+  return dir.createFile(name, 'application/octet-stream');
 }

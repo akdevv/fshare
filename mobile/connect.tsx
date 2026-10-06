@@ -40,6 +40,8 @@ type Props = {
 };
 
 const EASE = Easing.bezier(0.32, 0.72, 0, 1);
+// paired before 1.0.8, when phones swapped their keys in the clear: forget it and pair again
+const REPAIR = 'Forget and pair again to secure';
 
 // pushed from the main screen: slides in from the right, Back (or the back gesture) closes it
 export function DevicesScreen(props: Props & { open: boolean }) {
@@ -160,7 +162,9 @@ export function ConnectScreen({
                       <Text style={st.name} numberOfLines={1}>
                         {d.name}
                       </Text>
-                      <Text style={st.meta}>{via(d)}</Text>
+                      <Text style={[st.meta, p && !p.e2e && st.warn]} numberOfLines={1}>
+                        {p && !p.e2e ? REPAIR : via(d)}
+                      </Text>
                     </View>
                     {p && <ForgetButton name={p.name} onForget={() => forget(p)} bg={t.surface2} />}
                     {now ? (
@@ -187,7 +191,9 @@ export function ConnectScreen({
                     <Text style={[st.name, { color: t.dim }]} numberOfLines={1}>
                       {p.name}
                     </Text>
-                    <Text style={st.meta}>Not nearby</Text>
+                    <Text style={[st.meta, !p.e2e && st.warn]} numberOfLines={1}>
+                      {p.e2e ? 'Not nearby' : REPAIR}
+                    </Text>
                   </View>
                   <ForgetButton name={p.name} onForget={() => forget(p)} bg={t.surface2} />
                 </View>
@@ -394,6 +400,7 @@ const styles = (t: Theme) =>
     },
     name: { color: t.text, fontSize: 16, fontWeight: '600' },
     meta: { color: t.dim, fontSize: 13 },
+    warn: { color: t.amber },
     badge: { width: 24, height: 24, borderRadius: 12, backgroundColor: t.accent, alignItems: 'center', justifyContent: 'center' },
     pill: { height: 32, paddingHorizontal: 14, borderRadius: 16, backgroundColor: t.surface2, justifyContent: 'center' },
     pillText: { color: t.text, fontSize: 13, fontWeight: '700' },

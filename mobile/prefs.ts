@@ -18,7 +18,8 @@ export type Prefs = {
 };
 
 // a phone paired over Wi-Fi; `base` is where it was last seen (its address can change)
-export type SavedPeer = { id: string; name: string; token: string; base: string };
+// e2e: paired with the code check (1.0.8+); older pairings swapped tokens in the clear and should be redone
+export type SavedPeer = { id: string; name: string; token: string; base: string; e2e?: boolean };
 
 const f = new File(Paths.document, '.fshare-prefs.json');
 

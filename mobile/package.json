@@ -1,6 +1,6 @@
 {
   "name": "mobile",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "main": "index.ts",
   "dependencies": {
     "@expo-google-fonts/jetbrains-mono": "^0.4.1",
@@ -58,8 +58,7 @@
     "testPathIgnorePatterns": [
       "/node_modules/",
       "/android/",
-      "/ios/",
-      "/e2e/"
+      "/ios/"
     ],
     "modulePaths": [
       "<rootDir>/node_modules"

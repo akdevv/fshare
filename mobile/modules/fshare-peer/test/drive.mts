@@ -84,13 +84,23 @@ try {
   check('upload: keeps what arrived', received === 100_000);
   check('upload: resumes', (await fetch(q(received), { method: 'PUT', body: nodeSealed.subarray(received) })).status === 200);
   const got = await wait(() => events.find((e) => e.event === 'received'));
-  check('upload: opened, with its real name', got.name === 'photo.jpg' && fs.readFileSync(new URL(got.uri)).equals(plain));
+  // handed to the app still sealed (it opens it straight into the save folder)
+  const arrived = fs.readFileSync(new URL(got.uri));
+  const opened = Buffer.concat(await Readable.from([arrived]).pipe(opener('ptok')).toArray());
+  check('upload: handed over sealed, with its real name', got.name === 'photo.jpg' && arrived.equals(nodeSealed) && opened.equals(plain));
   const replay = await fetch(q(0), { method: 'PUT', body: nodeSealed });
   check("upload: a replay isn't saved twice", replay.status === 200 && events.filter((e) => e.event === 'received').length === 1);
-  // junk of the right size is thrown away once it's all there
+  // junk of the right size arrives, but won't open (the app then throws it away)
   await fetch(u(`/upload?id=job2&name=${name}&size=500&offset=0`, 'PUT'), { method: 'PUT', body: Buffer.alloc(500, 1) });
-  const st = await wait(() => events.find((e) => e.event === 'stopped' && e.id === 'job2'));
-  check('upload: junk thrown away', st.reason === 'cancelled' && !fs.readdirSync(`${dir}/parts`).some((f) => f.startsWith('job2')));
+  const junk = await wait(() => events.find((e) => e.event === 'received' && e.id === 'job2'));
+  const refused = await Readable.from([fs.readFileSync(new URL(junk.uri))])
+    .pipe(opener('ptok'))
+    .toArray()
+    .then(
+      () => false,
+      () => true,
+    );
+  check("upload: junk won't open", refused);
 } catch (e) {
   check(`no errors (${e})`, false);
 } finally {

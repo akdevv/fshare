@@ -28,12 +28,12 @@ const val KEEP_MS = 5 * 60_000L // how long a half-received file waits for the s
 //   POST /hello?name=&port=&id=&pub=   Wi-Fi pairing, step 1: swap ECDH keys, get a request id
 //   POST /hello?wait=&token=           step 2: our user compares the code and accepts; returns our token, sealed
 //   GET  /list                    sealed { name, kind: "phone", files: [] } (phones push, they don't publish)
-//   GET|PUT|DELETE /upload?id=    resumable upload of a sealed file; opened, then handed to JS to save
+//   GET|PUT|DELETE /upload?id=    resumable upload of a sealed file; handed to JS, still sealed, to open and save
 // ponytail: thread per connection; fine for a handful of peers.
 class PeerServer(
   private val port: Int,
   private val token: String,
-  private val name: String,
+  @Volatile var name: String, // renamed in Settings: paired phones see it on their next /list
   private val partsDir: File,
   private val emit: Emit,
 ) {
@@ -210,20 +210,11 @@ class PeerServer(
     uploads.remove(id)
     if (f.length() != size) return respond(out, 400, "incomplete")
     finished.add(id)
-    respond(out, 200, "ok") // all here; opening it can take a while for a big file, so don't keep the sender waiting
     emit("progress", info(size))
-    val plain = File(partsDir, "${f.name}.open")
-    try {
-      plain.outputStream().buffered(1 shl 18).use { o -> f.inputStream().buffered(1 shl 18).use { Seal.openFile(token, it, o) } }
-    } catch (e: Exception) {
-      // didn't open: not sealed with our token, or damaged on the way. Keep nothing.
-      plain.delete(); f.delete()
-      emit("stopped", mapOf("id" to id, "reason" to "cancelled"))
-      return true
-    }
-    f.delete()
-    emit("received", mapOf("id" to id, "name" to name, "from" to from, "uri" to Uri.fromFile(plain).toString(), "size" to plain.length().toDouble()))
-    return true
+    // still sealed: the app opens it straight into the save folder (no second copy), and throws
+    // it away if it doesn't open
+    emit("received", mapOf("id" to id, "name" to name, "from" to from, "uri" to Uri.fromFile(f).toString(), "size" to size.toDouble()))
+    return respond(out, 200, "ok")
   }
 
   private fun respond(out: OutputStream, code: Int, body: String, type: String = "text/plain"): Boolean {
