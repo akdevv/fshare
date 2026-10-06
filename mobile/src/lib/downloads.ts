@@ -1,9 +1,7 @@
-// Where received files end up.
-// Android: a folder inside the public Download folder, granted once via the system picker
-//   (Android 11+ forbids apps from writing to the root of Download, so a subfolder like
-//   Download/fshare is the closest we can get). The grant persists across launches.
-// iOS: there is no Downloads folder, so files go to the app's Documents folder,
-//   which shows up in the Files app under "On My iPhone › fshare" (in a real build).
+// Where received files go.
+// Android: a folder inside Download, granted once in the system picker. Android 11+ doesn't let
+// apps write to Download itself, so a subfolder like Download/fshare is the closest there is.
+// iOS: the app's Documents folder, which shows in Files under "On My iPhone › fshare".
 import { Platform } from 'react-native';
 import { Directory, File, Paths } from 'expo-file-system';
 import { readPrefs, writePrefs } from './prefs';
@@ -26,8 +24,8 @@ export async function pickSaveDir(): Promise<Directory | null> {
     writePrefs({ saveDir: dir.uri });
     return dir;
   } catch {
-    return null;
-  } // picker cancelled
+    return null; // cancelled
+  }
 }
 
 // "content://…/tree/primary%3ADownload%2Ffshare" -> "Download/fshare"

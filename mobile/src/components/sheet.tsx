@@ -16,7 +16,7 @@ import { Gesture, GestureDetector, GestureHandlerRootView, ScrollView as GHScrol
 import { scheduleOnRN } from 'react-native-worklets';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { haptic, useStyles, type Theme } from './theme';
+import { haptic, useStyles, type Theme } from '../theme';
 import { Press } from './ui';
 import { appReveal } from './splash';
 
@@ -135,7 +135,7 @@ export function Sheet({ content, onClose }: { content: SheetContent | null; onCl
   }));
 
   const onScroll = useAnimatedScrollHandler((e) => scrollY.set(e.contentOffset.y));
-  // soft edges only where there's more to scroll to
+  // soft edges only where there's more to scroll
   const fade = (on: boolean) => {
     'worklet';
     return withTiming(on ? 1 : 0, { duration: 150 });
@@ -257,7 +257,6 @@ export function Sheet({ content, onClose }: { content: SheetContent | null; onCl
                     ))}
                   </View>
                 )}
-                {/* settings close with "Done", questions with "Cancel"; both quiet grey so the rows stay the focus */}
                 {!shown.hideClose && (
                   <Press style={s.close} onPress={cancel} accessibilityRole="button">
                     <Text style={s.closeText}>{shown.closeLabel ?? (shown.extra ? 'Done' : 'Cancel')}</Text>

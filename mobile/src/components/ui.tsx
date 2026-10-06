@@ -1,8 +1,6 @@
-// Shared building blocks. Motion runs on Reanimated (UI thread) and respects reduced-motion.
 import { useEffect, useState, type ReactNode } from 'react';
 import { Pressable, StyleSheet, Text, View, type PressableProps, type StyleProp, type ViewStyle } from 'react-native';
 import Animated, {
-  cubicBezier,
   Easing,
   FadeIn,
   Keyframe,
@@ -14,9 +12,8 @@ import Animated, {
 } from 'react-native-reanimated';
 import { Ionicons } from '@expo/vector-icons';
 import Svg, { Circle, Path } from 'react-native-svg';
-import { haptic, useStyles, useTheme, useThemePref, type Theme, type ThemePref } from './theme';
-
-export const EASE_OUT = cubicBezier(0.23, 1, 0.32, 1);
+import { haptic, useStyles, useTheme, useThemePref, type Theme, type ThemePref } from '../theme';
+import { CSS_EASE_OUT } from './motion';
 
 // Press feedback on press-in. Buttons scale to 0.97; list rows ("highlight") tint instead,
 // since a whole row shrinking reads as the screen squishing.
@@ -58,7 +55,7 @@ export function Press({
             : {
                 transitionProperty: ['transform', 'opacity'],
                 transitionDuration: 150,
-                transitionTimingFunction: EASE_OUT,
+                transitionTimingFunction: CSS_EASE_OUT,
                 transform: [{ scale: down && pressable && !reduced ? 0.97 : 1 }],
               },
           highlight && down && pressable && { backgroundColor: highlight },
@@ -70,7 +67,7 @@ export function Press({
   );
 }
 
-// Wrap content whose identity changes (an icon, a status line): the new one pops/fades in softly.
+// For content whose identity changes (an icon, a status line): the new one pops or fades in.
 const POP = new Keyframe({
   0: { opacity: 0, transform: [{ scale: 0.86 }] },
   100: { opacity: 1, transform: [{ scale: 1 }], easing: Easing.bezier(0.23, 1, 0.32, 1) },
@@ -87,7 +84,6 @@ export function Pop({ id, children, fade }: { id: string; children: ReactNode; f
   );
 }
 
-// Thin progress bar; the fill eases to each new value instead of jumping.
 export function Bar({ f, color, track, height = 6 }: { f: number; color: string; track: string; height?: number }) {
   return (
     <View style={{ height, borderRadius: height / 2, backgroundColor: track, overflow: 'hidden' }}>
@@ -111,7 +107,6 @@ export function Bar({ f, color, track, height = 6 }: { f: number; color: string;
 
 const AnimatedCircle = Animated.createAnimatedComponent(Circle);
 
-// Progress ring around a row's icon.
 export function Ring({
   f,
   color,
@@ -152,8 +147,7 @@ export function Ring({
   );
 }
 
-// Scalloped M3 "cookie" shape. `spin` slowly rotates the shape (not its children);
-// `outline` draws just the edge (used for ripples).
+// The scalloped Material 3 "cookie" shape. `spin` rotates the shape but not its children.
 export function Cookie({
   size,
   color,
@@ -201,7 +195,6 @@ export function Cookie({
   );
 }
 
-// System / Light / Dark segmented control with a sliding selection.
 export function ThemeToggle() {
   const [s, t] = useStyles(styles);
   const { pref, setPref } = useThemePref();
@@ -226,7 +219,7 @@ export function ThemeToggle() {
                 transform: [{ translateX: index * seg }],
                 transitionProperty: 'transform',
                 transitionDuration: 240,
-                transitionTimingFunction: EASE_OUT,
+                transitionTimingFunction: CSS_EASE_OUT,
               },
             ]}
           />
@@ -276,12 +269,12 @@ const styles = (t: Theme) =>
     segTextOn: { color: t.text, fontWeight: '700' },
   });
 
-// On/off switch drawn the same on iOS and Android (the native one looks out of place on Android).
-// The track tints and the knob glides across; the parent row owns the press, so this only draws.
+// Drawn the same on iOS and Android, where the native switch looks out of place. The parent row
+// owns the press; this only draws.
 export function Toggle({ on }: { on: boolean }) {
   const t = useTheme();
   const reduced = useReducedMotion();
-  const ease = { transitionDuration: reduced ? 0 : 240, transitionTimingFunction: EASE_OUT };
+  const ease = { transitionDuration: reduced ? 0 : 240, transitionTimingFunction: CSS_EASE_OUT };
   return (
     <Animated.View
       style={{

@@ -14,6 +14,7 @@ import java.security.interfaces.ECPublicKey
 import java.security.spec.ECGenParameterSpec
 import java.security.spec.ECPoint
 import java.security.spec.ECPublicKeySpec
+import java.util.concurrent.ConcurrentHashMap
 import javax.crypto.Cipher
 import javax.crypto.KeyAgreement
 import javax.crypto.Mac
@@ -34,9 +35,12 @@ object Seal {
   fun hmac(key: ByteArray, msg: ByteArray): ByteArray =
     Mac.getInstance("HmacSHA256").run { init(SecretKeySpec(key, "HmacSHA256")); doFinal(msg) }
 
-  fun keys(token: String): Keys {
+  private val derived = ConcurrentHashMap<String, Keys>()
+
+  // derived once per token: every request and every chunk needs them
+  fun keys(token: String): Keys = derived.getOrPut(token) {
     val root = hmac("fshare-e2e-1".toByteArray(), token.toByteArray())
-    return Keys(hmac(root, "enc".toByteArray()), hmac(root, "mac".toByteArray()))
+    Keys(hmac(root, "enc".toByteArray()), hmac(root, "mac".toByteArray()))
   }
 
   private fun hex(b: ByteArray) = b.joinToString("") { "%02x".format(it) }

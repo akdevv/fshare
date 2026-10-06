@@ -1,7 +1,7 @@
 // iOS 27 stops apps at launch unless they use the scene life cycle. Expo ships the scene delegate
 // (ExpoAppSceneDelegate) but SDK 57's template doesn't use it yet, so: register it in Info.plist and
 // let it start React Native in its window instead of the app delegate.
-// ponytail: drop this once `npx expo prebuild` generates a scene-based AppDelegate itself.
+// Drop this once `npx expo prebuild` generates a scene-based AppDelegate itself.
 const { withAppDelegate, withInfoPlist } = require('expo/config-plugins');
 
 module.exports = (config) => {

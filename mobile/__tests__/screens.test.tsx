@@ -1,8 +1,10 @@
 import { fireEvent, render, screen } from '@testing-library/react-native';
-import { ThemeProvider } from '../theme';
-import { Onboarding } from '../onboarding';
-import { ConnectScreen } from '../connect';
-import type { Device } from '../session';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { ThemeProvider } from '../src/theme';
+import { Onboarding } from '../src/screens/onboarding';
+import { ConnectScreen } from '../src/screens/devices';
+import { NO_DEVICE, type Device } from '../src/lib/device';
+import { MainScreen } from '../src/screens/main';
 
 const base = {
   current: null,
@@ -103,4 +105,34 @@ test('devices screen: phones paired before encryption say to pair again', async 
   await wrap(<ConnectScreen {...base} saved={[old, fresh]} />);
   expect(screen.getAllByText('Forget and pair again to secure')).toHaveLength(1);
   expect(screen.getByText('Not nearby')).toBeTruthy();
+});
+
+test('main screen: nothing connected, then the Devices screen', async () => {
+  const props = {
+    device: NO_DEVICE,
+    devices: [],
+    nearby: [],
+    saved: [],
+    onForget: () => {},
+    visible: true,
+    onVisible: () => {},
+    outbox: [],
+    clearOutbox: () => {},
+    onPick: () => {},
+    onPair: () => {},
+    onWifi: () => {},
+    onCable: () => {},
+  };
+  const metrics = { frame: { x: 0, y: 0, width: 390, height: 844 }, insets: { top: 0, left: 0, right: 0, bottom: 0 } };
+  await wrap(
+    <SafeAreaProvider initialMetrics={metrics}>
+      <MainScreen {...props} />
+    </SafeAreaProvider>,
+  );
+  expect(screen.getByText('Nothing here yet')).toBeTruthy();
+  expect(screen.getByText('Connect a device to start sharing.')).toBeTruthy();
+  expect(screen.getByLabelText('Send files')).toBeTruthy();
+  await fireEvent.press(screen.getByLabelText('Connect a device'));
+  expect(screen.getByText('Other ways to connect')).toBeTruthy();
+  await fireEvent.press(screen.getByLabelText('Back'));
 });

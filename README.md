@@ -89,11 +89,16 @@ fastest.
 
 ## How it's built
 
-- **`cli/`**: the laptop side, a Node.js HTTP server with a terminal UI. It also talks to Android
-  phones over USB (adb, or Android Open Accessory when USB debugging is off).
-- **`mobile/`**: the phone app, built with Expo and React Native. A native module
-  (`modules/fshare-peer`, Kotlin and Swift) runs the phone's own server, Wi-Fi discovery, the
-  USB-C link between phones and the encryption.
+- **`cli/`**: the laptop side, a Node.js HTTP server with a terminal UI.
+  - `fshare.ts` is the command; `server.ts` serves the phone, `seal.ts` is the encryption spec.
+  - `usb.ts` reaches Android phones over USB: adb, or Android Open Accessory when USB debugging is off.
+  - `term.ts` draws the terminal UI, and `install.ts` handles `update` and `uninstall`.
+- **`mobile/`**: the phone app, built with Expo and React Native.
+  - `src/screens/` holds the screens, `src/components/` what they're built from, and
+    `src/hooks/` the transfer engine, device discovery and connection polling.
+  - `src/lib/` holds identity, settings, pairing and saving files.
+  - `modules/fshare-peer/` is the native module, in Kotlin and Swift. It runs the phone's own
+    server, Wi-Fi discovery, the USB-C link between phones, and the encryption.
 
 ## Development
 

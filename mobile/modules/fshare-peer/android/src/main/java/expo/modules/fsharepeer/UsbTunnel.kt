@@ -34,7 +34,8 @@ import kotlin.concurrent.thread
 // The cable makes one phone the USB host. The host switches the other phone into Android Open
 // Accessory mode (AOA), after which both sides get a raw bulk pipe. Connections are multiplexed
 // over it with 9-byte frames: [type:1][conn:4][len:4][payload].
-// ponytail: no per-connection flow control; one slow socket stalls the pipe. Fine for one app talking to one peer.
+// There's no per-connection flow control, so one slow socket stalls the pipe; fine for one app
+// talking to one other phone.
 class UsbTunnel(private val context: Context, private val listenPort: Int, private val targetPort: Int, private val emit: Emit) {
   private interface Link { fun read(buf: ByteArray): Int; fun write(buf: ByteArray, len: Int); fun close() }
 

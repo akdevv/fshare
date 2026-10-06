@@ -29,7 +29,7 @@ const val KEEP_MS = 5 * 60_000L // how long a half-received file waits for the s
 //   POST /hello?wait=&token=           step 2: our user compares the code and accepts; returns our token, sealed
 //   GET  /list                    sealed { name, kind: "phone", files: [] } (phones push, they don't publish)
 //   GET|PUT|DELETE /upload?id=    resumable upload of a sealed file; handed to JS, still sealed, to open and save
-// ponytail: thread per connection; fine for a handful of peers.
+// One thread per connection: plenty for the few phones that connect at once.
 class PeerServer(
   private val port: Int,
   private val token: String,

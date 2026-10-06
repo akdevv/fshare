@@ -15,20 +15,29 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import { Transform } from "node:stream";
 
-export const CH = 65536;
+const CH = 65536;
 const TAG = 16;
-export const SALT = 7;
+const SALT = 7;
 
 const hmac = (k: string | Buffer, m: string | Buffer) => crypto.createHmac("sha256", k).update(m).digest();
 
-export function keys(token: string) {
-  const root = hmac("fshare-e2e-1", token);
-  return { enc: hmac(root, "enc"), mac: hmac(root, "mac") };
+type Keys = { enc: Buffer; mac: Buffer };
+const derived = new Map<string, Keys>();
+
+// derived once per token: every request and every chunk needs them
+function keys(token: string): Keys {
+  let k = derived.get(token);
+  if (!k) {
+    const root = hmac("fshare-e2e-1", token);
+    k = { enc: hmac(root, "enc"), mac: hmac(root, "mac") };
+    derived.set(token, k);
+  }
+  return k;
 }
 
 export const sign = (token: string, msg: string) => hmac(keys(token).mac, msg).subarray(0, 16).toString("hex");
 
-// "GET /list?c=1&s=…" → the part that was signed, if the signature checks out
+// `url` as it came off the wire, "/list?c=1&s=…": the signature covers everything before &s=
 export function verify(token: string, method: string, url: string): boolean {
   const m = /[?&]s=([0-9a-f]{32})$/.exec(url);
   if (!m) return false;
@@ -54,7 +63,7 @@ export function open(token: string, sealed: string): Buffer | null {
   }
 }
 
-export const chunks = (size: number) => (size === 0 ? 1 : Math.ceil(size / CH));
+const chunks = (size: number) => (size === 0 ? 1 : Math.ceil(size / CH));
 export const sealedSize = (size: number) => SALT + size + TAG * chunks(size);
 
 const nonce = (salt: Buffer, i: number, last: boolean) => {
@@ -76,8 +85,8 @@ function openChunk(enc: Buffer, salt: Buffer, i: number, last: boolean, sealed: 
   return Buffer.concat([d.update(sealed.subarray(0, sealed.length - TAG)), d.final()]);
 }
 
-// The same file always seals to the same bytes (salt from its path, size and mtime), so a paused
-// download resumes with an HTTP Range into the sealed stream. `from` is an offset in that stream.
+// The same file always seals to the same bytes (the salt comes from its path, size and mtime), so a
+// paused download resumes with an HTTP Range into the sealed stream; `from` is an offset in it.
 export function fileSalt(token: string, abs: string, st: { size: number; mtimeMs: number }) {
   return hmac(keys(token).mac, `file\0${abs}\0${st.size}\0${Math.floor(st.mtimeMs)}`).subarray(0, SALT);
 }
@@ -108,7 +117,7 @@ export async function* sealFile(token: string, abs: string, size: number, salt: 
   }
 }
 
-// sealed stream in, the file out; errors on anything tampered with, reordered or cut short
+// A sealed stream in, the file out. Fails on anything tampered with, reordered or cut short.
 export function opener(token: string) {
   const { enc } = keys(token);
   let salt: Buffer | null = null,
@@ -145,7 +154,7 @@ export function opener(token: string) {
   });
 }
 
-// phone pairing, for tests (the laptop doesn't pair with phones this way)
+// The phones' side of pairing; here for the tests, since the laptop pairs by QR code or cable.
 export function pairSecret(ecdh: crypto.ECDH, theirPub: string) {
   const z = ecdh.computeSecret(Buffer.from(theirPub, "base64url"));
   const secret = hmac("fshare-pair-1", z).toString("hex");

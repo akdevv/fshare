@@ -15,9 +15,18 @@ enum Seal {
     Data(HMAC<SHA256>.authenticationCode(for: msg, using: SymmetricKey(data: key)))
   }
 
+  private static var derived = [String: Keys]()
+  private static let lock = NSLock()
+
+  // derived once per token: every request and every chunk needs them
   static func keys(_ token: String) -> Keys {
+    lock.lock()
+    defer { lock.unlock() }
+    if let k = derived[token] { return k }
     let root = hmac(Data("fshare-e2e-1".utf8), Data(token.utf8))
-    return Keys(enc: SymmetricKey(data: hmac(root, Data("enc".utf8))), mac: SymmetricKey(data: hmac(root, Data("mac".utf8))))
+    let k = Keys(enc: SymmetricKey(data: hmac(root, Data("enc".utf8))), mac: SymmetricKey(data: hmac(root, Data("mac".utf8))))
+    derived[token] = k
+    return k
   }
 
   private static func mac(_ k: Keys, _ msg: Data) -> Data { Data(HMAC<SHA256>.authenticationCode(for: msg, using: k.mac)) }
@@ -41,7 +50,6 @@ enum Seal {
     guard let r = target.range(of: "[?&]s=[0-9a-f]{32}$", options: .regularExpression) else { return false }
     let got = String(target[r].suffix(32))
     let want = sign(token, "\(method) \(target[..<r.lowerBound])")
-    // constant time
     return zip(want.utf8, got.utf8).reduce(0) { $0 | ($1.0 ^ $1.1) } == 0 && want.count == got.count
   }
 

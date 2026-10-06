@@ -1,25 +1,17 @@
-// The one place to connect: your devices, phones nearby, and the other ways in. Full screen.
-// Opened from the main screen (Back), or shown on launch when nothing is connected (Skip).
+// The one place to connect: your devices, phones nearby, and the other ways in. Pushed over the
+// main screen (Back closes it), or shown on launch when nothing is connected (Skip).
 import { useEffect, useState } from 'react';
-import { BackHandler, ScrollView, StyleSheet, Text, View } from 'react-native';
-import Animated, {
-  Easing,
-  FadeIn,
-  FadeOut,
-  LinearTransition,
-  ReduceMotion,
-  SlideInRight,
-  SlideOutRight,
-  useReducedMotion,
-} from 'react-native-reanimated';
+import { BackHandler, Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
+import Animated, { FadeIn, FadeOut, useReducedMotion } from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Ionicons } from '@expo/vector-icons';
-import { haptic, useStyles, type Theme } from './theme';
-import { Cookie, EASE_OUT, Press, Toggle } from './ui';
-import { ConnectOptions, ForgetButton, NO_DEVICE, type Device } from './session';
-import type { Found } from './modules/fshare-peer';
-import { me } from './identity';
-import type { SavedPeer } from './prefs';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import type { Found } from '../../modules/fshare-peer';
+import { CSS_EASE_OUT, ENTER, EXIT, LAYOUT, Pushed } from '../components/motion';
+import { Cookie, Press, Toggle } from '../components/ui';
+import { describe, NO_DEVICE, type Device } from '../lib/device';
+import { me } from '../lib/identity';
+import type { SavedPeer } from '../lib/prefs';
+import { haptic, useStyles, type Theme } from '../theme';
 
 type Props = {
   current: Device | null; // what the main screen is on; null when nothing is
@@ -39,21 +31,14 @@ type Props = {
   onSkip?: () => void; // the launch screen
 };
 
-const EASE = Easing.bezier(0.32, 0.72, 0, 1);
-// paired before 1.0.8, when phones swapped their keys in the clear: forget it and pair again
+// paired before 1.0.8, when phones swapped their keys in the clear
 const REPAIR = 'Forget and pair again to secure';
 
-// pushed from the main screen: slides in from the right, Back (or the back gesture) closes it
-export function DevicesScreen(props: Props & { open: boolean }) {
-  if (!props.open) return null;
+export function DevicesScreen({ open, ...props }: Props & { open: boolean }) {
   return (
-    <Animated.View
-      entering={SlideInRight.duration(340).easing(EASE).reduceMotion(ReduceMotion.System)}
-      exiting={SlideOutRight.duration(260).easing(EASE).reduceMotion(ReduceMotion.System)}
-      style={StyleSheet.absoluteFill}
-    >
+    <Pushed open={open}>
       <ConnectScreen {...props} />
-    </Animated.View>
+    </Pushed>
   );
 }
 
@@ -99,7 +84,6 @@ export function ConnectScreen({
     setGone((g) => [...g, p.id]);
     onForget(p);
   };
-  const via = (d: Device) => `${d.kind === 'laptop' ? 'Laptop' : 'Phone'} · ${d.via === 'usb' ? 'USB cable' : 'Wi-Fi'}`;
 
   return (
     <SafeAreaView style={st.root} edges={['top', 'left', 'right']}>
@@ -142,14 +126,14 @@ export function ConnectScreen({
               const now = d.id === connected?.id;
               const p = pairedOf(d);
               return (
-                <Animated.View key={d.id} exiting={FadeOut.duration(160)} layout={LinearTransition.duration(240)}>
+                <Animated.View key={d.id} exiting={EXIT} layout={LAYOUT}>
                   {i > 0 && <View style={st.sep} />}
                   <Press
                     style={st.row}
                     highlight={now ? undefined : t.surface2}
                     onPress={now ? undefined : () => onPick(d)}
                     accessibilityRole={now ? undefined : 'button'}
-                    accessibilityLabel={`${d.name}, ${via(d)}${now ? ', connected' : ''}`}
+                    accessibilityLabel={`${d.name}, ${describe(d)}${now ? ', connected' : ''}`}
                   >
                     <View style={[st.icon, now && { backgroundColor: t.accentSoft }]}>
                       <Ionicons
@@ -163,10 +147,10 @@ export function ConnectScreen({
                         {d.name}
                       </Text>
                       <Text style={[st.meta, p && !p.e2e && st.warn]} numberOfLines={1}>
-                        {p && !p.e2e ? REPAIR : via(d)}
+                        {p && !p.e2e ? REPAIR : describe(d)}
                       </Text>
                     </View>
-                    {p && <ForgetButton name={p.name} onForget={() => forget(p)} bg={t.surface2} />}
+                    {p && <ForgetButton name={p.name} onForget={() => forget(p)} />}
                     {now ? (
                       <View style={st.badge}>
                         <Ionicons name="checkmark" size={13} color={t.onAccent} />
@@ -181,7 +165,7 @@ export function ConnectScreen({
               );
             })}
             {away.map((p, i) => (
-              <Animated.View key={p.id} exiting={FadeOut.duration(160)} layout={LinearTransition.duration(240)}>
+              <Animated.View key={p.id} exiting={EXIT} layout={LAYOUT}>
                 {(i > 0 || reachable.length > 0) && <View style={st.sep} />}
                 <View style={st.row} accessible accessibilityLabel={`${p.name}, not nearby`}>
                   <View style={st.icon}>
@@ -195,7 +179,7 @@ export function ConnectScreen({
                       {p.e2e ? 'Not nearby' : REPAIR}
                     </Text>
                   </View>
-                  <ForgetButton name={p.name} onForget={() => forget(p)} bg={t.surface2} />
+                  <ForgetButton name={p.name} onForget={() => forget(p)} />
                 </View>
               </Animated.View>
             ))}
@@ -203,7 +187,6 @@ export function ConnectScreen({
         )}
 
         {phones && (
-          // compact: one line, the switch says the rest
           <Press
             style={st.visible}
             highlight={t.surface2}
@@ -236,12 +219,7 @@ export function ConnectScreen({
               <Searching />
             ) : (
               nearby.map((f, i) => (
-                <Animated.View
-                  key={f.name}
-                  entering={FadeIn.duration(220)}
-                  exiting={FadeOut.duration(160)}
-                  layout={LinearTransition.duration(240)}
-                >
+                <Animated.View key={f.name} entering={ENTER} exiting={EXIT} layout={LAYOUT}>
                   {i > 0 && <View style={st.sep} />}
                   <Press
                     style={st.row}
@@ -269,7 +247,6 @@ export function ConnectScreen({
           </Section>
         )}
 
-        {/* the less common ways in, folded away until asked for */}
         <View style={{ gap: 8 }}>
           <Press
             style={st.fold}
@@ -288,7 +265,7 @@ export function ConnectScreen({
                 transform: [{ rotate: more ? '180deg' : '0deg' }],
                 transitionProperty: 'transform',
                 transitionDuration: 220,
-                transitionTimingFunction: EASE_OUT,
+                transitionTimingFunction: CSS_EASE_OUT,
               }}
             >
               <Ionicons name="chevron-down" size={16} color={t.dim} />
@@ -317,7 +294,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-// nothing nearby yet: the app's searching mark, small, with a line on what to do
+// nothing nearby yet: the searching mark and what to do
 function Searching() {
   const [st, t] = useStyles(styles);
   const reduced = useReducedMotion();
@@ -336,7 +313,7 @@ function Searching() {
                 animationDuration: '2.8s',
                 animationDelay: `${delay}s`,
                 animationIterationCount: 'infinite',
-                animationTimingFunction: EASE_OUT,
+                animationTimingFunction: CSS_EASE_OUT,
               }}
             >
               <Cookie size={56} color={t.accent} outline />
@@ -351,6 +328,80 @@ function Searching() {
         <Text style={[st.meta, { textAlign: 'center' }]}>Open fshare on a phone on this Wi-Fi</Text>
       </View>
     </View>
+  );
+}
+
+// The less common ways in, folded away on the screen until asked for.
+function ConnectOptions({ onCable, onWifi }: { onCable?: () => void; onWifi: () => void }) {
+  const [st, t] = useStyles(styles);
+  const rows = [
+    ...(onCable && Platform.OS === 'android'
+      ? [{ icon: 'flash-outline' as const, title: 'USB cable', detail: 'Plug in your laptop or another phone', onPress: onCable }]
+      : []),
+    { icon: 'qr-code-outline' as const, title: 'Scan QR code', detail: 'Connect your laptop over Wi-Fi', onPress: onWifi },
+  ];
+  return (
+    <View style={st.group}>
+      {rows.map((r, i) => (
+        <View key={r.title}>
+          {i > 0 && <View style={st.sep} />}
+          <Press
+            style={st.row}
+            highlight={t.surface2}
+            onPress={() => {
+              haptic.tap();
+              r.onPress();
+            }}
+            accessibilityRole="button"
+            accessibilityLabel={`${r.title}, ${r.detail}`}
+          >
+            <View style={st.icon}>
+              <Ionicons name={r.icon} size={19} color={t.text} />
+            </View>
+            <View style={{ flex: 1, gap: 2 }}>
+              <Text style={st.name}>{r.title}</Text>
+              <Text style={st.meta}>{r.detail}</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={16} color={t.faint} />
+          </Press>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+// Two taps, both in place: the first turns the button into a red "Forget" for 3 seconds, the
+// second removes the phone.
+function ForgetButton({ name, onForget }: { name: string; onForget: () => void }) {
+  const [st, t] = useStyles(styles);
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (!armed) return;
+    const timer = setTimeout(() => setArmed(false), 3000);
+    return () => clearTimeout(timer);
+  }, [armed]);
+  return (
+    <Press
+      style={[st.forget, armed && { backgroundColor: t.redSoft, paddingHorizontal: 12 }]}
+      onPress={() => {
+        if (armed) {
+          haptic.reject();
+          onForget();
+        } else {
+          haptic.select();
+          setArmed(true);
+        }
+      }}
+      hitSlop={8}
+      accessibilityRole="button"
+      accessibilityLabel={armed ? `Confirm: forget ${name}` : `Forget ${name}`}
+    >
+      {armed ? (
+        <Text style={[st.pillText, { color: t.red, fontWeight: '600' }]}>Forget</Text>
+      ) : (
+        <MaterialCommunityIcons name="link-variant-off" size={16} color={t.dim} />
+      )}
+    </Press>
   );
 }
 
@@ -428,4 +479,5 @@ const styles = (t: Theme) =>
       backgroundColor: t.surface,
     },
     visibleText: { flex: 1, color: t.dim, fontSize: 14 },
+    forget: { height: 32, minWidth: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', backgroundColor: t.surface2 },
   });

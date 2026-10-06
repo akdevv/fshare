@@ -5,7 +5,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
-import { createServer, parsePaths, safeDest, expand } from "./fshare.ts";
+import { expand, parsePaths, safeDest } from "./files.ts";
+import { createServer } from "./server.ts";
 import { opener, open, seal, sealedSize, sealFile, sign } from "./seal.ts";
 
 assert.deepEqual(parsePaths(`/a/my\\ file.txt '/b/x y' "/c/z" /d`), ["/a/my file.txt", "/b/x y", "/c/z", "/d"]);

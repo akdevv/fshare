@@ -6,20 +6,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
-import {
-  batchNotify,
-  clip,
-  createServer,
-  sweepParts,
-  switchToAccessory,
-  encodeFrame,
-  FRAME,
-  frameReader,
-  parsePaths,
-  tunnel,
-  UI,
-  usbParts,
-} from "./fshare.ts";
+import { batchNotify } from "./desktop.ts";
+import { parsePaths } from "./files.ts";
+import { createServer, sweepParts } from "./server.ts";
+import { clip, UI } from "./term.ts";
+import { encodeFrame, FRAME, frameReader, switchToAccessory, tunnel, usbParts } from "./usb.ts";
 import { open, pairSecret, seal, sealedSize, sealFile, sign, verify } from "./seal.ts";
 
 const plain = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, ""); // eslint-disable-line no-control-regex
