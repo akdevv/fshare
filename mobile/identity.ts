@@ -33,8 +33,9 @@ export function openList(token: string, body: string) {
   return JSON.parse(text) as { name: string; kind: 'laptop' | 'phone'; files: { id: number; path: string; size: number }[] };
 }
 
-// laptops see it on the next request; nearby phones once fshare restarts its announcement
+// laptops see it on their next request, nearby phones as soon as the new announcement goes out
 export function rename(name: string) {
   me.name = name;
   writePrefs({ name });
+  Peer?.setName(name);
 }

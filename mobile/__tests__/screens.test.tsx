@@ -96,3 +96,11 @@ test('visibility switch reports changes and updates its text', async () => {
   expect(onVisible).toHaveBeenCalledWith(false);
   expect(screen.getByText('Hidden from nearby phones')).toBeTruthy();
 });
+
+test('devices screen: phones paired before encryption say to pair again', async () => {
+  const old = { id: 'a1', name: 'Old Phone', token: 't', base: 'http://192.168.1.9:4748' };
+  const fresh = { id: 'b2', name: 'New Phone', token: 't', base: 'http://192.168.1.7:4748', e2e: true };
+  await wrap(<ConnectScreen {...base} saved={[old, fresh]} />);
+  expect(screen.getAllByText('Forget and pair again to secure')).toHaveLength(1);
+  expect(screen.getByText('Not nearby')).toBeTruthy();
+});

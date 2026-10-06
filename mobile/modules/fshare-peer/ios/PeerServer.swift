@@ -11,11 +11,11 @@ let keepParts: TimeInterval = 5 * 60 // how long a half-received file waits for 
 //   POST /hello?name=&port=&id=&pub=   Wi-Fi pairing, step 1: swap ECDH keys, get a request id
 //   POST /hello?wait=&token=           step 2: our user compares the code and accepts; returns our token, sealed
 //   GET  /list                         sealed { name, kind: "phone", files: [] }
-//   GET|PUT|DELETE /upload?id=         resumable upload of a sealed file; opened, then handed to JS to save
+//   GET|PUT|DELETE /upload?id=         resumable upload of a sealed file; handed to JS, still sealed, to open and save
 // Everything runs on one serial queue.
 final class PeerServer {
   let q = DispatchQueue(label: "fshare-server")
-  let name: String
+  private(set) var name: String
   private let port: UInt16
   private let token: String
   private let id: String
@@ -96,6 +96,8 @@ final class PeerServer {
   }
 
   func setVisible(_ v: Bool) { q.async { self.visible = v; self.listener?.service = self.service() } }
+  // renamed in Settings: re-announce under the new name, and answer /list with it
+  func setName(_ n: String) { q.async { self.name = n; self.listener?.service = self.service() } }
   func answer(_ id: String, _ ok: Bool) { q.async { self.pairs[id]?(ok) } }
 
   // receiver taps cancel: drop the connection (the sender sees it fail) and the partial file
@@ -211,23 +213,11 @@ final class PeerServer {
       }
       if self.size(id) != total { return k.respond(400, "incomplete") }
       self.finished.insert(id)
-      k.respond(200, "ok") // all here; opening it can take a while for a big file, so don't keep the sender waiting
       self.emit("progress", info())
-      let plain = f.appendingPathExtension("open")
-      let token = self.token
-      DispatchQueue.global(qos: .userInitiated).async {
-        do {
-          try Seal.openFile(token, from: f, to: plain)
-          try? FileManager.default.removeItem(at: f)
-          let size = (try? FileManager.default.attributesOfItem(atPath: plain.path)[.size] as? NSNumber)?.doubleValue ?? 0
-          self.emit("received", ["id": id, "name": name, "from": from, "uri": plain.absoluteString, "size": size])
-        } catch {
-          // didn't open: not sealed with our token, or damaged on the way. Keep nothing.
-          try? FileManager.default.removeItem(at: plain)
-          try? FileManager.default.removeItem(at: f)
-          self.emit("stopped", ["id": id, "reason": "cancelled"])
-        }
-      }
+      // still sealed: the app opens it straight into the save folder (no second copy), and throws
+      // it away if it doesn't open
+      self.emit("received", ["id": id, "name": name, "from": from, "uri": f.absoluteString, "size": Double(total)])
+      k.respond(200, "ok")
     }
   }
 }

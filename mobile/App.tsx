@@ -144,7 +144,11 @@ function Root() {
     if (!Peer) return;
     Peer.start(me.token, me.name, me.id, !readPrefs().hidden);
     const subs = [
-      Peer.addListener('peerFound', (f) => f.id !== me.id && setNearby((n) => [...n.filter((x) => x.name !== f.name), f])),
+      // names are unique on the network; ids catch the same phone back under a new name (renamed)
+      Peer.addListener(
+        'peerFound',
+        (f) => f.id !== me.id && setNearby((n) => [...n.filter((x) => x.name !== f.name && (!f.id || x.id !== f.id)), f]),
+      ),
       Peer.addListener('peerLost', ({ name }) => setNearby((n) => n.filter((x) => x.name !== name))),
       // another phone tapped us in its list: ask before letting it in
       Peer.addListener('pairRequest', (r) => {
@@ -154,7 +158,7 @@ function Root() {
           setSheet(null);
           if (!ok) return haptic.reject();
           haptic.success();
-          const p = { id: r.peer || r.host, name: r.name, token: r.token, base: `http://${r.host}:${r.port}` };
+          const p = { id: r.peer || r.host, name: r.name, token: r.token, base: `http://${r.host}:${r.port}`, e2e: true };
           remember(p);
           const d = phone(p);
           setDevices((ds) => [...ds.filter((x) => x.id !== d.id), d]);
@@ -323,7 +327,7 @@ function Root() {
       const r = await fetch(`${base}/hello?wait=${id}&token=${Peer.seal(secret, me.token)}`, { method: 'POST', signal: ctrl.signal });
       const token = r.ok && Peer.open(secret, await r.text());
       if (!token) throw new Error('declined');
-      const p = { id: f.id || f.host, name: f.name, token, base };
+      const p = { id: f.id || f.host, name: f.name, token, base, e2e: true };
       remember(p);
       const d = phone(p);
       setDevices((ds) => [...ds.filter((x) => x.id !== d.id), d]);

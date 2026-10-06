@@ -84,7 +84,6 @@ same network band.
 npm run setup      # install everything (root tools, cli/, mobile/)
 npm run check      # what CI runs: format, lint, typecheck, unit + integration tests
 npm run format     # fix formatting
-npm run e2e        # end-to-end on this Mac (see below)
 npm run test:native  # the app's Android and iOS peer servers, built outside the app and driven from Node
 ```
 
@@ -95,13 +94,8 @@ npm run test:native  # the app's Android and iOS peer servers, built outside the
 | Types | `tsc` for `cli/` and `mobile/` | each `tsconfig.json` |
 | CLI tests | `node --test`: HTTP server round-trips (resume, cancel, unshare), terminal UI, USB tunnel with a fake phone | `cli/*.test.ts` |
 | App tests | Jest (`jest-expo`) + Testing Library: helpers and screens | `mobile/__tests__/` |
-| E2E | Maestro drives the real app in the iOS simulator (Expo Go) against a real CLI: onboarding, connect, select/remove, download, settings, about | `mobile/e2e/` |
+| Phone servers | The app's Kotlin and Swift peer servers, built outside the app (`npm run test:native`, not in CI): signing, sealing, pairing, resumable uploads | `mobile/modules/fshare-peer/test/` |
 | Release tooling | version bump / versionCode math | `scripts/release.test.mjs` |
-
-**E2E prerequisites** (one time): Xcode with an iOS simulator that has Expo Go (run `npx expo start` in
-`mobile/` and press `i` once), and `brew install mobile-dev-inc/tap/maestro`. Port 4747 must be free
-(quit any running `fshare`). `npm run e2e` starts the CLI with sample files, Metro if needed, resets the
-app's saved state, runs `mobile/e2e/app.yaml`, and checks the CLI really sent and unshared the files.
 
 **APK (local only):** `npm run apk` builds `dist/fshare-<version>.apk` (a few minutes; needs JDK 17 and
 the Android SDK: `brew install openjdk@17 && brew install --cask android-commandlinetools`). APKs aren't

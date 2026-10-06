@@ -4,14 +4,14 @@ import Animated, { Easing, FadeIn, FadeOut, LinearTransition, ReduceMotion } fro
 import { Directory, File, Paths } from 'expo-file-system';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { getSaveDir, label, pickSaveDir, saveInto } from './downloads';
+import { getSaveDir, label, pickSaveDir, placeFor } from './downloads';
 import { About } from './about';
 import { Sheet, type SheetContent } from './sheet';
 import { eta, fileIcon, fmt, haptic, rate, useStyles, type Theme } from './theme';
 import { Bar, Cookie, Pop, Press, Ring, ThemeToggle } from './ui';
 import { Peer, type Found } from './modules/fshare-peer';
 import { DevicesScreen } from './connect';
-import { client, openList, signed } from './identity';
+import { client, me, openList, signed } from './identity';
 import { openFile } from './open';
 import { Preferences } from './settings';
 
@@ -292,6 +292,22 @@ export function Session({
       declined.current = false;
     }
   };
+  // a sealed file that arrived whole: opened straight into the save folder, so there's never a
+  // decrypted copy on the side. Rejects (and leaves nothing behind) if it doesn't open.
+  const openInto = async (root: Directory, token: string, sealed: File, relPath: string) => {
+    const dest = placeFor(root, relPath);
+    try {
+      await Peer!.openFile(token, sealed.uri, dest.uri);
+    } catch (e) {
+      try {
+        dest.delete();
+      } catch {}
+      throw e;
+    }
+    sealed.delete();
+    return dest;
+  };
+
   const ensureSaveDir = () =>
     new Promise<Directory | null>((resolve) => {
       if (saveDir) return resolve(saveDir);
@@ -380,10 +396,7 @@ export function Session({
           }
           if (stopped.current.has(key)) throw new Error('cancelled');
           patch(key, { state: 'saving', done: r.size });
-          const plain = new File(tmpDir, r.path.split('/').pop()!);
-          await Peer!.openFile(server.token, tmp.uri, plain.uri); // rejects anything tampered with or cut short
-          tmp.delete();
-          const saved = await saveInto(root, plain, r.path);
+          const saved = await openInto(root, server.token, tmp, r.path);
           tmpDir.delete();
           patch(key, { state: 'done', file: saved });
         },
@@ -424,27 +437,26 @@ export function Session({
     await pool(batch, PARALLEL, async ({ f, key }) => {
       const tmpDir = new Directory(Paths.cache, 'fshare-up', key);
       await run(key, async () => {
-        let src = f;
-        controls.current.set(key, { cancel: () => {} }); // the copy can't be interrupted; checked right after
-        // Android hands us a content:// URI served through the media provider's FUSE layer; the
-        // upload reads it 8 KB at a time (~2-4 MB/s on a Galaxy S23). copy() reads in big chunks,
-        // and the copy also gets the real file name instead of "msf:1000113138".
-        if (!f.uri.startsWith('file:')) {
-          patch(key, { state: 'preparing' });
-          tmpDir.create({ intermediates: true, idempotent: true });
-          await f.copy(tmpDir);
-          src = tmpDir.list()[0] as File;
-          if (stopped.current.has(key)) throw new Error('cancelled');
-          patch(key, { state: 'active', name: src.name });
-        }
-        // sealed for `to` before it leaves the phone; the same id always seals to the same bytes, so a
-        // retry carries on from what the other side kept
+        controls.current.set(key, { cancel: () => {} }); // sealing can't be interrupted; checked right after
+        // Sealed for `to` before it leaves the phone, read straight from the original (Android's
+        // content:// URIs too), so the only extra space is the sealed copy. The same id always seals
+        // to the same bytes, so a retry carries on from what the other side kept.
         patch(key, { state: 'preparing' });
         tmpDir.create({ intermediates: true, idempotent: true });
         const sealed = new File(tmpDir, '.sealed');
-        await Peer!.sealFile(to.token, src.uri, sealed.uri, key);
+        let info: { size: number; name: string | null };
+        try {
+          info = await Peer!.sealFile(to.token, f.uri, sealed.uri, key);
+        } catch {
+          // a provider that won't say how big the file is: copy it in first, then seal the copy
+          await f.copy(tmpDir);
+          const copy = tmpDir.list().find((e) => e instanceof File && e.name !== '.sealed') as File;
+          info = await Peer!.sealFile(to.token, copy.uri, sealed.uri, key);
+          copy.delete();
+        }
         if (stopped.current.has(key)) throw new Error('cancelled');
-        patch(key, { state: 'active' });
+        const src = { name: info.name ?? f.name }; // the real name, not "msf:1000113138"
+        patch(key, { state: 'active', name: src.name });
         const on = progress(key, 'up');
         const size = sealed.size;
         const forget = () => fetch(url(`/upload?id=${key}`, 'DELETE'), { method: 'DELETE' }).catch(() => {}); // laptop forgets the part
@@ -610,11 +622,15 @@ export function Session({
       const root = await ensureSaveDir();
       try {
         if (!root) throw new Error('no save folder');
-        const saved = await saveInto(root, new File(uri), name);
+        const saved = await openInto(root, me.token, new File(uri), name); // sealed with our token
         patch(key, { state: 'done', file: saved });
       } catch (e) {
+        // didn't open (not sealed with our token, or damaged on the way), or couldn't be saved
         console.warn('[fshare] saving a received file failed:', e);
         patch(key, { state: 'error' });
+        try {
+          new File(uri).delete();
+        } catch {}
       }
       incoming.current.delete(id);
       finished([key]);
