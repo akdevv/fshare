@@ -1,6 +1,6 @@
 {
   "name": "mobile",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "main": "index.ts",
   "dependencies": {
     "@expo-google-fonts/jetbrains-mono": "^0.4.1",
